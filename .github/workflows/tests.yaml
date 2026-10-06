@@ -1,0 +1,61 @@
+---
+name: tests
+on:
+  push:
+    branches:
+      - main
+      - '*.*.*'
+  pull_request:
+    branches:
+      - main
+      - '*.*.*'
+
+env:
+  UV_LOCKED: 1
+  UV_PYTHON_PREFERENCE: only-managed
+
+permissions:
+  contents: read
+
+jobs:
+  style:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+      - name: Run style checks
+        run: uv run prek run --all-files --show-diff-on-failure
+
+  doc:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.13"
+          python-version: "3.14"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --group doc
+      - run: uv run sphinx-build -W --keep-going -b html doc build/sphinx/html
+
+  all-checks:
+    if: always()
+    needs: [style, doc]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail if a needed job did not succeed
+        if: >-
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
+        run: exit 1

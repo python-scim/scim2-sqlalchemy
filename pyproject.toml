@@ -1,0 +1,50 @@
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "scim2-sqlalchemy"
+version = "0.0.0"
+description = "Painless SCIM integration for SQLAlchemy"
+readme = "README.md"
+authors = [
+    { name = "Éloi Rivard", email = "eloi@yaal.coop" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "scim2-models>=0.10.0",
+]
+
+[project.urls]
+documentation = "https://scim2-sqlalchemy.readthedocs.io"
+repository = "https://github.com/python-scim/scim2-sqlalchemy"
+funding = "https://github.com/sponsors/python-scim"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "prek>=0.1.0",
+    "pytest>=8.2.1",
+]
+doc = [
+    "myst-parser>=3.0.1",
+    "shibuya>=2024.5.15",
+    "sphinx>=7.3.7",
+    "sphinx-issues>=5.0.0",
+]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+files = ["src/scim2_sqlalchemy"]
+strict = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+exclude-newer = "14 days"
+exclude-newer-package = { scim2-models = false, scim2-client = false, scim2-server = false, scim2-cli = false, scim2-tester = false, pytest-scim2-server = false }
