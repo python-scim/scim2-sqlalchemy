@@ -534,6 +534,29 @@ def test_a_version_changed_meanwhile_raises_a_412(storage_factory, user_type):
         storage.update(user_type, user)
 
 
+@pytest.mark.parametrize(
+    "filter",
+    ['userName eq "Élise"', 'userName sw "Éli"', 'userName ne "Élise"'],
+)
+def test_a_value_with_accents_matches_itself(storage, user_type, filter):
+    """Both sides are lowered by the database, which may only lower ASCII letters."""
+    storage.create(user_type, UserModel(user_name="Élise"))
+    storage.create(user_type, UserModel(user_name="bjensen"))
+
+    total, resources = search(storage, user_type, filter=filter)
+
+    expected = ["bjensen"] if " ne " in filter else ["Élise"]
+    assert [resource.user_name for resource in resources] == expected
+
+
+def test_a_value_with_accents_is_taken(storage, user_type):
+    """The uniqueness check finds a value with accents, before the database does."""
+    storage.create(user_type, UserModel(user_name="Élise"))
+
+    with pytest.raises(UniquenessException):
+        storage.create(user_type, UserModel(user_name="Élise"))
+
+
 def test_a_failed_operation_leaves_the_others(sync_storage_factory, session, user_type):
     """Each operation is a savepoint, so a bulk request goes on after a failure."""
     storage = sync_storage_factory()

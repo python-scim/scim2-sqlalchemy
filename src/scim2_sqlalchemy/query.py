@@ -23,6 +23,7 @@ from sqlalchemy import and_
 from sqlalchemy import false
 from sqlalchemy import func
 from sqlalchemy import inspect
+from sqlalchemy import literal
 from sqlalchemy import not_
 from sqlalchemy import nulls_first
 from sqlalchemy import nulls_last
@@ -49,6 +50,15 @@ _SUBSTRINGS = {
     CompareOperator.sw: "startswith",
     CompareOperator.ew: "endswith",
 }
+
+_ESCAPE = "/"
+
+
+def _escape(value: str) -> str:
+    """Escape the LIKE wildcards of a value, so that they match themselves."""
+    for character in (_ESCAPE, "%", "_"):
+        value = value.replace(character, _ESCAPE + character)
+    return value
 
 
 def _as_key(column: _Column, value: Any) -> Any:
@@ -183,16 +193,19 @@ def _compare(column: _Column, op: CompareOperator, value: Any) -> ColumnElement[
             return expression.is_not(None)
         return false()
 
-    left, right = expression, value
-    if column.casefolded:
-        left, right = func.lower(expression), value.lower()
+    # Both sides are lowered by the database, so that a value always matches
+    # itself, even where the database only lowers ASCII letters.
+    def side(value: Any) -> Any:
+        return func.lower(literal(value)) if column.casefolded else value
 
+    left = func.lower(expression) if column.casefolded else expression
     if op == CompareOperator.ne:
-        return or_(expression.is_(None), left != right)
+        return or_(expression.is_(None), left != side(value))
     if op in _SUBSTRINGS:
-        condition = getattr(left, _SUBSTRINGS[op])(right, autoescape=True)
+        pattern = side(_escape(value))
+        condition = getattr(left, _SUBSTRINGS[op])(pattern, escape=_ESCAPE)
     else:
-        condition = _ORDERINGS[op](left, right)
+        condition = _ORDERINGS[op](left, side(value))
     return and_(expression.is_not(None), condition)
 
 

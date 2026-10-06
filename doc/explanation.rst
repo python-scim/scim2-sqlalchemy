@@ -41,9 +41,11 @@ differs from a direct translation in several places:
   while ``emails[value ne "x"]`` holds when one email is not ``x``.
 - A value selection, such as ``emails[type eq "work" and primary eq true]``, applies all its
   conditions to the same entry.
-- A string compares without its case, unless the schema declares it ``caseExact``. The storage
-  lowers both sides. A database index that serves these filters is an index on the lowered
-  column.
+- A string compares without its case, unless the schema declares it ``caseExact``. The database
+  lowers both sides, with its own rules: SQLite only lowers ASCII letters, and PostgreSQL
+  follows the locale of the database. Neither normalizes Unicode, so a composed ``é`` and a
+  decomposed ``é`` differ. A database index that serves these filters is an index on the
+  lowered column.
 - The ``%`` and ``_`` characters of a ``co``, ``sw`` or ``ew`` value are escaped, so that they
   match themselves.
 

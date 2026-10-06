@@ -25,6 +25,7 @@ what a search supports:
      - One per search. A search at the root raises
        :class:`~scim2_models.NotImplementedException`.
 
-A string compares without its case, unless its attribute is ``caseExact``. A resource without a
+A string compares without its case, as the database lowers it, unless its attribute is
+``caseExact``. A resource without a
 value sorts last when ascending, and first when descending. An attribute the resource type does
 not declare matches no resource.
