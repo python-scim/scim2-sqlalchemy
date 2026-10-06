@@ -4,9 +4,12 @@ from importlib import metadata
 # -- General configuration ------------------------------------------------
 
 extensions = [
+    "sphinx.ext.autodoc",
+    "sphinx.ext.doctest",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.viewcode",
+    "sphinx_design",
     "sphinx_issues",
-    "myst_parser",
 ]
 
 templates_path = ["_templates"]
@@ -15,10 +18,7 @@ project = "scim2-sqlalchemy"
 year = datetime.datetime.now().strftime("%Y")
 copyright = f"{year}, Yaal Coop"
 author = "Yaal Coop"
-source_suffix = {
-    ".rst": "restructuredtext",
-    ".md": "markdown",
-}
+source_suffix = {".rst": "restructuredtext"}
 
 version = metadata.version("scim2-sqlalchemy")
 language = "en"
@@ -28,6 +28,8 @@ toctree_collapse = False
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "scim2_models": ("https://scim2-models.readthedocs.io/en/latest/", None),
+    "scim2_server": ("https://scim2-server.readthedocs.io/en/latest/", None),
+    "sqlalchemy": ("https://docs.sqlalchemy.org/en/20/", None),
     "scim2_client": ("https://scim2-client.readthedocs.io/en/latest/", None),
     "scim2_tester": ("https://scim2-tester.readthedocs.io/en/latest/", None),
     "scim2_cli": ("https://scim2-cli.readthedocs.io/en/latest/", None),
@@ -124,6 +126,10 @@ html_context = {
     "source_version": "main",
     "source_docs_path": "/doc/",
 }
+
+autodoc_member_order = "bysource"
+autodoc_preserve_defaults = True
+autodoc_typehints = "description"
 
 # -- Options for sphinx-issues -------------------------------------
 

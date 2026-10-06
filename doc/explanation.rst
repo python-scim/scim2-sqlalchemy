@@ -1,0 +1,144 @@
+How the storage works
+=====================
+
+This page explains why the SQLAlchemy storage behaves as it does: why it maps existing models,
+how its queries keep the meaning of SCIM, and why it refuses some writes. It is for developers
+who already use the storage and want to understand its choices, away from the keyboard. The
+steps to use it are in the :doc:`overview` and the how-to guides. The rules every storage
+follows are in :doc:`scim2_server:explanation/storage`.
+
+The models of the application stay the source of truth
+------------------------------------------------------
+
+An application that adds SCIM already has its data, in tables designed for its own needs. The
+storage maps these tables as they are, rather than bringing tables of its own. A table designed
+for SCIM would hold the resources as JSON documents, which databases filter and index unevenly,
+and would leave the application with two copies of its users.
+
+A single declaration, the :class:`~scim2_sqlalchemy.ResourceMapping`, serves every task of the
+storage: reading a record, writing it, filtering and sorting. A storage written by hand
+describes the tables twice, once for the conversions and once for the queries, and the two
+descriptions drift apart. For an example of such a storage, read
+:doc:`scim2_server:how-to/serve-an-existing-data-model`.
+
+The mapping checks its paths against the SCIM model when it is created. A mistake shows up when
+the application starts, rather than on the first request that needs the attribute.
+
+Filters keep the meaning of SCIM
+--------------------------------
+
+The storage turns a SCIM filter into a SQL condition, so that the database returns the matching
+rows only, and counts them for ``totalResults``. Filtering in Python after the query would make
+the total and the pages wrong. The condition gives the result that
+:meth:`ScimFilter.match <scim2_models.ScimFilter.match>` gives on the same resources, which
+differs from a direct translation in several places:
+
+- SQL compares nothing to ``NULL``: ``title != 'Boss'`` is unknown when ``title`` is ``NULL``. In
+  SCIM, ``title ne "Boss"`` holds for a user without a title. The storage writes every condition
+  so that it is either true or false, never unknown, and a negation then keeps its meaning.
+- A filter on a multi-valued attribute holds when one of its values matches: ``emails co "work"``
+  becomes an ``EXISTS`` on the email table. ``emails ne "x"`` holds when no email is ``x``,
+  while ``emails[value ne "x"]`` holds when one email is not ``x``.
+- A value selection, such as ``emails[type eq "work" and primary eq true]``, applies all its
+  conditions to the same entry.
+- A string compares without its case, unless the schema declares it ``caseExact``. The storage
+  lowers both sides. A database index that serves these filters is an index on the lowered
+  column.
+- The ``%`` and ``_`` characters of a ``co``, ``sw`` or ``ew`` value are escaped, so that they
+  match themselves.
+
+An attribute the resource type does not declare matches no resource
+(:rfc:`RFC 7644 §3.4.2.1 <7644#section-3.4.2.1>`). An attribute it declares but the mapping does
+not store raises an ``invalidFilter`` error instead: the storage cannot evaluate it, and an empty
+result would be a wrong answer.
+
+Sorting follows RFC 7644
+------------------------
+
+:rfc:`RFC 7644 §3.4.2.3 <7644#section-3.4.2.3>` places the resources without a value last in an
+ascending sort, and first in a descending one. Databases disagree on where ``NULL`` goes, so the
+storage states the place of ``NULL`` in every query. A multi-valued attribute sorts on its
+``primary`` entry, or else on its first one.
+
+The storage always ends the order with the identifier of the record. Two resources sharing a
+sort value would otherwise come back in any order, and a resource could appear on two pages, or
+on none.
+
+Writes that cannot be stored are refused
+----------------------------------------
+
+A mapping rarely stores every attribute of a schema. A server that accepted a value and dropped
+it would answer as if it kept the value, and the client would only notice when it reads the
+resource again. The storage refuses such a write with a 400 error instead:
+
+- a value for an attribute no column stores gets ``invalidValue``;
+- a different value for an attribute the mapping only reads gets ``mutability``;
+- the removal of a value whose column cannot be ``NULL`` gets ``mutability``.
+
+The storage compares each value with the stored resource. A client that sends back a resource it
+has read sends the computed values and the read-only values unchanged, and the write succeeds.
+The attributes the schema declares ``readOnly`` are left out of the comparison, since
+:rfc:`RFC 7644 §3.5.1 <7644#section-3.5.1>` has the server ignore them.
+
+These refusals catch the attributes the published schemas announce and the mapping does not
+store. Publishing the schemas of the mappings, as :doc:`how-to/publish-the-stored-attributes`
+does, keeps clients from sending them at all. The refusals then only protect against a mapping
+that drifts away from the models written by hand.
+
+The server builds the URL of a link
+-----------------------------------
+
+The ``$ref`` of a link, such as the ``$ref`` of a group member, is the URL of the linked
+resource. The storage knows the linked record and its resource type, but not the URL the server
+answers at, which depends on the proxy, the host and the tenant. It returns a ``$ref`` relative to
+the SCIM root, such as ``Users/2819c223``, which :rfc:`RFC 7643 §2.3.7 <7643#section-2.3.7>`
+allows. scim2-server turns it into an absolute URL, as it does for ``meta.location``.
+
+The storage stores the ``value`` of a link only. It ignores the ``$ref`` a client sends, and
+refuses an entry without ``value``: storing nothing for it would lose the link.
+
+Versions protect concurrent writes
+----------------------------------
+
+The version of a resource comes from the
+:ref:`version counter <sqlalchemy:mapper_version_counter>` of its SQLAlchemy model. SQLAlchemy
+increments the column on every write, and adds the version it read to the ``WHERE`` clause of the
+``UPDATE``. The storage first compares the stored version with the one the client sent in
+``If-Match``, and answers 412 when they differ. A write by another transaction between the read
+and the write matches no row: SQLAlchemy raises :exc:`~sqlalchemy.orm.exc.StaleDataError`, which the storage turns into
+a 412 too.
+
+Unique values are checked twice
+-------------------------------
+
+Before a write, the storage searches for another record holding a unique value of the resource,
+such as its ``userName``, and answers 409 when it finds one. The search follows the case rules of
+the attribute, so ``BJensen`` clashes with ``bjensen``, which a plain unique constraint does not
+catch. A unique constraint of the database remains the guard against two concurrent writes. When
+a flush fails on a constraint, the storage searches again, and answers 409 when the value is now
+taken. Any other :exc:`~sqlalchemy.exc.IntegrityError` goes through unchanged.
+
+The application owns the transaction
+------------------------------------
+
+The storage :ref:`flushes <sqlalchemy:session_flushing>` each write, so that the database fills the identifiers and checks its
+constraints, and never commits. The application, or its web framework, already decides when a
+request ends and whether its changes are kept. Each operation runs in a :ref:`savepoint <sqlalchemy:session_begin_nested>`, so that a
+failed operation leaves the session usable, and a bulk request goes on after a failure.
+
+The asynchronous storage loads every collection of a record with the record. An
+:class:`~sqlalchemy.ext.asyncio.AsyncSession` cannot load a relationship
+:ref:`lazily <sqlalchemy:asyncio_orm_avoid_lazyloads>`, on first access. Both storages load the same way, so
+they send the same queries.
+
+Limits
+------
+
+The storage serves one resource type per search. A search at the root of the server, on every
+resource type at once, gets a 501 error, which :rfc:`RFC 7644 §3.12 <7644#section-3.12>` allows
+for an unsupported operation. The resources of several types live in several tables, with
+nothing in common to sort or page on.
+
+The storage pages with ``startIndex`` and ``count``. It does not support the cursors of
+:rfc:`9865`. It loads whole records, even when the request asks for some attributes only:
+scim2-server removes the other attributes from the response.
