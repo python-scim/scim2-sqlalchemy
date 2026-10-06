@@ -18,12 +18,9 @@ Unit tests
 Run ``uv run pytest`` before submitting a patch. Run ``uv run tox`` to test every supported
 Python version. Everything must pass before a patch can be merged.
 
-The tests run on SQLite. To run them on PostgreSQL too, give the URL of a database the tests may
-empty in the ``SCIM2_SQLALCHEMY_POSTGRESQL_URL`` environment variable:
-
-.. code-block:: console
-
-   $ SCIM2_SQLALCHEMY_POSTGRESQL_URL=postgresql+psycopg://localhost/scim uv run pytest
+The tests run on SQLite, and on PostgreSQL when its server is installed. They start a temporary
+PostgreSQL server with `pytest-postgresql <https://github.com/dbfixtures/pytest-postgresql>`_,
+from the ``pg_ctl`` command of the ``PATH``. The test coverage threshold needs both databases.
 
 The test coverage threshold is 100%. Check it with
 ``uv run pytest --cov --cov-fail-under=100 --cov-report=html``. The report is written to

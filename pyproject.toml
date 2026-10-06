@@ -38,6 +38,7 @@ dev = [
     "psycopg[binary]>=3.3.6",
     "pytest>=8.2.1",
     "pytest-cov>=7.1.0",
+    "pytest-postgresql>=9.1.0",
     "scim2-client>=0.11.2",
     "scim2-server[testing]>=0.6.2",
     "scim2-tester>=0.5.2",
@@ -120,7 +121,6 @@ env_list = [
 [tool.tox.env_run_base]
 runner = "uv-venv-lock-runner"
 dependency_groups = ["dev"]
-pass_env = ["SCIM2_SQLALCHEMY_POSTGRESQL_URL"]
 commands = [
     ["pytest", "--showlocals", "--full-trace", "{posargs}"],
 ]

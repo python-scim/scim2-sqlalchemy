@@ -41,6 +41,8 @@ jobs:
           version: "0.12.13"
           python-version: ${{ matrix.python }}
           enable-cache: true
+      - name: Put the PostgreSQL server of the runner in the PATH
+        run: ls -d /usr/lib/postgresql/*/bin | tail -n 1 >> "$GITHUB_PATH"
       - name: Run tests
         run: uv run pytest --showlocals
 
@@ -56,31 +58,10 @@ jobs:
           version: "0.12.13"
           python-version: "3.14"
           enable-cache: true
+      - name: Put the PostgreSQL server of the runner in the PATH
+        run: ls -d /usr/lib/postgresql/*/bin | tail -n 1 >> "$GITHUB_PATH"
       - name: Run tests
         run: uv run pytest --cov --cov-fail-under=100
-
-  postgresql:
-    name: PostgreSQL unit tests
-    runs-on: ubuntu-24.04
-    env:
-      SCIM2_SQLALCHEMY_POSTGRESQL_URL: postgresql+psycopg://postgres:postgres@localhost/scim
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.12.13"
-          python-version: "3.14"
-          enable-cache: true
-      - name: Start the PostgreSQL server of the runner
-        run: |
-          sudo systemctl start postgresql.service
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
-          sudo -u postgres createdb scim
-      - name: Run tests
-        run: uv run pytest --showlocals --cov --cov-fail-under=100
 
   minversions:
     name: minimum dependency versions
@@ -136,7 +117,7 @@ jobs:
 
   all-checks:
     if: always()
-    needs: [tests, coverage, postgresql, minversions, style, doc]
+    needs: [tests, coverage, minversions, style, doc]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if a needed job did not succeed

@@ -1,5 +1,5 @@
 import asyncio
-import os
+import shutil
 
 import pytest
 from scim2_models import ResourceType
@@ -22,10 +22,8 @@ from .models import MAPPINGS
 from .models import USERS
 from .models import Base
 
-POSTGRESQL_URL = os.environ.get("SCIM2_SQLALCHEMY_POSTGRESQL_URL")
-"""A PostgreSQL database the tests may empty, such as postgresql+psycopg://localhost/test."""
-
-DATABASES = ["sqlite"] + (["postgresql"] if POSTGRESQL_URL else [])
+DATABASES = ["sqlite"] + (["postgresql"] if shutil.which("pg_ctl") else [])
+"""The databases of the tests: PostgreSQL too when its server is installed."""
 
 
 def async_url(url):
@@ -48,11 +46,21 @@ def enforce_foreign_keys(engine):
     return engine
 
 
+@pytest.fixture(scope="session")
+def postgresql_url(postgresql_proc):
+    """Return the URL of a database on the PostgreSQL server the tests start."""
+    return (
+        f"postgresql+psycopg://{postgresql_proc.user}@{postgresql_proc.host}"
+        f":{postgresql_proc.port}/postgres"
+    )
+
+
 @pytest.fixture(params=DATABASES)
 def database_url(request, tmp_path):
     """Return the URL of an empty database, holding the tables of the test models."""
     sqlite_url = f"sqlite:///{tmp_path}/scim.sqlite"
-    url = POSTGRESQL_URL if request.param == "postgresql" else sqlite_url
+    postgresql = request.param == "postgresql"
+    url = request.getfixturevalue("postgresql_url") if postgresql else sqlite_url
     engine = create_engine(url)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
