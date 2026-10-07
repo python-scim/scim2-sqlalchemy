@@ -111,9 +111,7 @@ class _KeyFunction(_Comparator):
         connection.create_function(_KEY_FUNCTION, 2, self.key, deterministic=True)
 
     async def prepare_async(self, connection: Any) -> None:
-        await connection.create_function(
-            _KEY_FUNCTION, 2, self.key, deterministic=True
-        )
+        await connection.create_function(_KEY_FUNCTION, 2, self.key, deterministic=True)
 
     def key(self, urn: str, value: Any) -> Any:
         if value is None:
@@ -124,7 +122,10 @@ class _KeyFunction(_Comparator):
             return None
 
     def column(self, column: _Column) -> ColumnElement[Any]:
-        return getattr(func, _KEY_FUNCTION)(literal(column.binding.urn), column.compared)  # type: ignore[no-any-return]
+        key: ColumnElement[Any] = getattr(func, _KEY_FUNCTION)(
+            literal(column.binding.urn), column.compared
+        )
+        return key
 
     def operand(self, column: _Column, value: str) -> Any:
         return column.binding.comparable(value, self.policy)

@@ -50,11 +50,9 @@ def user_names(storage, resource_type, **parameters):
 
 def test_a_decomposed_value_matches_its_composed_form(storage, user_type):
     """Both sides are normalized to NFC, whatever form the value was written in."""
-    storage.create(user_type, UserModel(user_name="José"))
+    storage.create(user_type, UserModel(user_name="Jose\u0301"))
 
-    assert user_names(storage, user_type, filter='userName eq "José"') == [
-        "José"
-    ]
+    assert user_names(storage, user_type, filter='userName eq "José"') == ["Jose\u0301"]
 
 
 def test_a_decomposed_value_is_taken(storage, user_type):
@@ -62,7 +60,7 @@ def test_a_decomposed_value_is_taken(storage, user_type):
     storage.create(user_type, UserModel(user_name="José"))
 
     with pytest.raises(UniquenessException):
-        storage.create(user_type, UserModel(user_name="José"))
+        storage.create(user_type, UserModel(user_name="Jose\u0301"))
 
 
 @pytest.mark.parametrize(
@@ -124,9 +122,7 @@ def test_sqlite_compares_with_the_key_of_the_policy(
     storage = storage_factory(provider=strict_provider)
     storage.create(user_type, UserModel(user_name="Straße"))
 
-    assert user_names(storage, user_type, filter='userName eq "STRASSE"') == [
-        "Straße"
-    ]
+    assert user_names(storage, user_type, filter='userName eq "STRASSE"') == ["Straße"]
     with pytest.raises(UniquenessException):
         storage.create(user_type, UserModel(user_name="strasse"))
 
@@ -186,7 +182,10 @@ def test_a_database_without_the_key_warns(
     [
         ('userName eq "A"', "lower(users.user_name) = lower('A')"),
         ('externalId eq "A"', "users.external_id = 'A'"),
-        ('userName co "a%"', "lower(users.user_name) LIKE concat('%%', lower('a/%%'), '%%')"),
+        (
+            'userName co "a%"',
+            "lower(users.user_name) LIKE concat('%%', lower('a/%%'), '%%')",
+        ),
     ],
 )
 def test_another_database_lowers_both_sides(filter, expected):
