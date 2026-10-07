@@ -1,4 +1,5 @@
 import datetime
+from collections.abc import Iterable
 from collections.abc import Mapping
 from enum import Enum
 from inspect import isclass
@@ -54,8 +55,11 @@ def _to_scim(
     resource_type: str,
     model: type[Resource[Any]],
     endpoints: Mapping[str, str],
+    collections: Iterable[_Collection],
 ) -> Resource[Any]:
     """Build the resource a record stores, as an instance of model.
+
+    Only the given collections are read: the others may not be loaded.
 
     The attributes are found by their URN, so model may be another model of
     the same schemas than the model of the mapping, such as a model a provider
@@ -72,7 +76,7 @@ def _to_scim(
         if value is not None:
             Path[model](column.binding.urn).set(resource, value)  # type: ignore[valid-type]
 
-    for collection in mapping._collections.values():
+    for collection in collections:
         endpoint = None
         if Path[model](f"{collection.binding.urn}.$ref").resolve() is not None:  # type: ignore[valid-type]
             endpoint = endpoints.get(collection.resource_type)  # type: ignore[arg-type]

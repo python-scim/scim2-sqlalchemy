@@ -17,6 +17,7 @@ from scim2_models import Path
 from scim2_models import PreconditionFailedException
 from scim2_models import Resource
 from scim2_models import ResourceType
+from scim2_models import ResponseParameters
 from scim2_models import ScimPolicy
 from scim2_models import ScimProvider
 from scim2_models import SearchRequest
@@ -99,10 +100,24 @@ class _StorageBase:
         model = self.provider.model_for(resource_type) if self.provider else None
         return model or self._mapping(resource_type).model  # type: ignore[return-value]
 
-    def _to_scim(self, resource_type: ResourceType, record: Any) -> Resource[Any]:
+    def _to_scim(
+        self,
+        resource_type: ResourceType,
+        record: Any,
+        parameters: ResponseParameters[Any] | None = None,
+    ) -> Resource[Any]:
+        """Build the resource a record stores, with the collections the response keeps."""
         mapping = self._mapping(resource_type)
         model = self._model(resource_type)
-        return _to_scim(mapping, record, resource_type.name, model, self._endpoints)  # type: ignore[arg-type]
+        collections = mapping._returned_collections(parameters)
+        return _to_scim(
+            mapping,
+            record,
+            resource_type.name,  # type: ignore[arg-type]
+            model,
+            self._endpoints,
+            collections,
+        )
 
     def _check_storable(
         self, resource_type: ResourceType, resource: Resource[Any], record: Any
@@ -238,8 +253,15 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         with self.session().begin_nested():
             yield
 
-    def get(self, resource_type: ResourceType, resource_id: str) -> Resource[Any]:
-        return self._to_scim(resource_type, self._load(resource_type, resource_id))
+    def get(
+        self,
+        resource_type: ResourceType,
+        resource_id: str,
+        *,
+        response_parameters: ResponseParameters[Any] | None = None,
+    ) -> Resource[Any]:
+        record = self._load(resource_type, resource_id, response_parameters)
+        return self._to_scim(resource_type, record, response_parameters)
 
     def search(
         self, resource_types: list[ResourceType], search_request: SearchRequest[Any]
@@ -250,7 +272,10 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         count, page = _search_statements(mapping, search_request, comparator)
         total = session.scalar(count) or 0
         records = session.scalars(page).all()
-        return total, [self._to_scim(resource_types[0], record) for record in records]
+        resource_type = resource_types[0]
+        return total, [
+            self._to_scim(resource_type, record, search_request) for record in records
+        ]
 
     def create(
         self, resource_type: ResourceType, resource: Resource[Any]
@@ -299,8 +324,15 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         self._check_version(mapping, record, expected_version)
         self._flush(lambda: self.session().delete(record))
 
-    def _load(self, resource_type: ResourceType, resource_id: str | None) -> Any:
-        statement = _load_statement(self._mapping(resource_type), resource_id)
+    def _load(
+        self,
+        resource_type: ResourceType,
+        resource_id: str | None,
+        parameters: ResponseParameters[Any] | None = None,
+    ) -> Any:
+        """Load a record, with the collections the response keeps."""
+        mapping = self._mapping(resource_type)
+        statement = _load_statement(mapping, resource_id, parameters)
         record = None if statement is None else self.session().scalar(statement)
         if record is None:
             raise self._not_found(resource_type, resource_id)
@@ -390,9 +422,15 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         async with self.session().begin_nested():
             yield
 
-    async def get(self, resource_type: ResourceType, resource_id: str) -> Resource[Any]:
-        record = await self._load(resource_type, resource_id)
-        return self._to_scim(resource_type, record)
+    async def get(
+        self,
+        resource_type: ResourceType,
+        resource_id: str,
+        *,
+        response_parameters: ResponseParameters[Any] | None = None,
+    ) -> Resource[Any]:
+        record = await self._load(resource_type, resource_id, response_parameters)
+        return self._to_scim(resource_type, record, response_parameters)
 
     async def search(
         self, resource_types: list[ResourceType], search_request: SearchRequest[Any]
@@ -403,7 +441,10 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         count, page = _search_statements(mapping, search_request, comparator)
         total = await session.scalar(count) or 0
         records = (await session.scalars(page)).all()
-        return total, [self._to_scim(resource_types[0], record) for record in records]
+        resource_type = resource_types[0]
+        return total, [
+            self._to_scim(resource_type, record, search_request) for record in records
+        ]
 
     async def create(
         self, resource_type: ResourceType, resource: Resource[Any]
@@ -457,8 +498,15 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
 
         await self._flush(change)
 
-    async def _load(self, resource_type: ResourceType, resource_id: str | None) -> Any:
-        statement = _load_statement(self._mapping(resource_type), resource_id)
+    async def _load(
+        self,
+        resource_type: ResourceType,
+        resource_id: str | None,
+        parameters: ResponseParameters[Any] | None = None,
+    ) -> Any:
+        """Load a record, with the collections the response keeps."""
+        mapping = self._mapping(resource_type)
+        statement = _load_statement(mapping, resource_id, parameters)
         record = None if statement is None else await self.session().scalar(statement)
         if record is None:
             raise self._not_found(resource_type, resource_id)

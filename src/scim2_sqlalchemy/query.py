@@ -5,6 +5,7 @@ from typing import Any
 from scim2_models import AttributeBinding
 from scim2_models import InvalidFilterException
 from scim2_models import InvalidPathException
+from scim2_models import ResponseParameters
 from scim2_models import ScimFilter
 from scim2_models import SearchRequest
 from scim2_models.path import AttrPath
@@ -289,7 +290,9 @@ def _search_statements(
         select(mapping.record)
         .where(condition)
         .order_by(*_order_by(mapping, search_request, comparator))
-        .options(*mapping._loader_options())
+        .options(
+            *mapping._loader_options(mapping._returned_collections(search_request))
+        )
         .offset(search_request.start_index_0 or 0)
     )
     if search_request.count is not None:
@@ -298,16 +301,21 @@ def _search_statements(
 
 
 def _load_statement(
-    mapping: ResourceMapping, resource_id: str | None
+    mapping: ResourceMapping,
+    resource_id: str | None,
+    parameters: ResponseParameters[Any] | None = None,
 ) -> Select[Any] | None:
-    """Return the statement loading a record, or None when no record can have this identifier."""
+    """Return the statement loading a record, or None when no record can have this identifier.
+
+    Only the collections the response keeps are loaded, all of them without parameters.
+    """
     key = _as_key(mapping._id, resource_id)
     if key is None:
         return None
     return (
         select(mapping.record)
         .where(mapping._id.expression == key)
-        .options(*mapping._loader_options())
+        .options(*mapping._loader_options(mapping._returned_collections(parameters)))
         .execution_options(populate_existing=True)
     )
 

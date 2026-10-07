@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from scim2_models import AttributeBinding
 from scim2_models import Mutability
 from scim2_models import Path
 from scim2_models import Resource
+from scim2_models import ResponseParameters
 from scim2_models import Schema
 from scim2_models import Uniqueness
 from sqlalchemy import ColumnElement
@@ -409,14 +411,34 @@ class ResourceMapping:
             ):
                 yield column
 
-    def _loader_options(self) -> list[strategy_options._AbstractLoad]:
-        """Return the options loading every collection along with the records.
+    def _returned_collections(
+        self, parameters: ResponseParameters[Any] | None = None
+    ) -> list[_Collection]:
+        """Return the collections a response keeps, all of them without parameters."""
+        collections = list(self._collections.values())
+        if parameters is None:
+            return collections
+        paths = Path[self.model].iter_paths(  # type: ignore[name-defined]
+            include_subattributes=False,
+            attributes=parameters.attributes,
+            excluded_attributes=parameters.excluded_attributes,
+        )
+        bindings = (path.resolve() for path in paths)
+        kept = {binding.urn for binding in bindings if binding is not None}
+        return [
+            collection for collection in collections if collection.binding.urn in kept
+        ]
+
+    def _loader_options(
+        self, collections: Iterable[_Collection]
+    ) -> list[strategy_options._AbstractLoad]:
+        """Return the options loading collections along with the records.
 
         Loading them up front is what lets an asynchronous session read them.
         """
         return [
             strategy_options.selectinload(collection.relationship)
-            for collection in self._collections.values()
+            for collection in collections
         ]
 
     def _bind(self, mappings: Mapping[str, "ResourceMapping"]) -> None:

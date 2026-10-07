@@ -173,5 +173,10 @@ for an unsupported operation. The resources of several types live in several tab
 nothing in common to sort or page on.
 
 The storage pages with ``startIndex`` and ``count``. It does not support the cursors of
-:rfc:`9865`. It loads whole records, even when the request asks for some attributes only:
-scim2-server removes the other attributes from the response.
+:rfc:`9865`.
+
+A search or a read only loads the collections its response keeps, following the ``attributes``
+and ``excludedAttributes`` parameters. With ``excludedAttributes=members``, the members of the
+groups are not loaded. The storage still loads every column of the records, which costs little
+next to a collection. A write reads the whole resource. scim2-server then removes the attributes
+the response does not keep.

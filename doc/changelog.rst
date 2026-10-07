@@ -19,3 +19,5 @@ Added
   attributes a mapping stores.
 - Filters, sorts and uniqueness checks compare strings with the comparison key of the policy of
   the provider: exactly on SQLite, and approximately on PostgreSQL.
+- A search or a read does not load the collections that ``attributes`` and ``excludedAttributes``
+  remove from the response, such as the members of the groups.
