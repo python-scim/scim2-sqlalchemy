@@ -1277,27 +1277,27 @@ wheels = [
 
 [[package]]
 name = "scim2-models"
-version = "0.10.6"
+version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lark" },
     { name = "pydantic", extra = ["email"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c3/db/d0b6a0f5df0bfbe833abc02eb28c50117a78d69751ec8c94e33851b8d44c/scim2_models-0.10.6.tar.gz", hash = "sha256:3f6547e385e6c16385e8ce3a82eac6039249f3878faaf38e87af07d0e7fece37", size = 103592, upload-time = "2026-10-06T10:22:21.831Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/0c/e606b06224867274ecc9fad9851121a3ec83aa4489b1a12b2e7052252580/scim2_models-0.12.0.tar.gz", hash = "sha256:3bd419c0a7f367d4b08320b5e7e6685270dc6b367fbc37a364b2e0e497a3829b", size = 107244, upload-time = "2026-10-06T21:04:46.593Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/b0/b3b9c98d0a896554b67cba3d9c1c545001c36e9ef31a5fc33b5b8be1a710/scim2_models-0.10.6-py3-none-any.whl", hash = "sha256:6d7822427e4c5ec30ff82d0a019f650455c9bacf7750bdd25fdf67fa200af449", size = 126256, upload-time = "2026-10-06T10:22:20.173Z" },
+    { url = "https://files.pythonhosted.org/packages/81/56/32f3e58b0396f96821ee1e93dabcf8ed15e40ce331682935901895980eb5/scim2_models-0.12.0-py3-none-any.whl", hash = "sha256:2c7d66fc65151583e1e6fe7c9a191aa60c506b713cbf0f96e4af877d13be313c", size = 130069, upload-time = "2026-10-06T21:04:45.192Z" },
 ]
 
 [[package]]
 name = "scim2-server"
-version = "0.6.2"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "scim2-models" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5b/aa/7af1da888fda928ca648b2d5f3196ba4a5d4f63bf582189c325ce3897223/scim2_server-0.6.2.tar.gz", hash = "sha256:ceac789203654323a47bea27fb4b81fe2d7e2a18b0ed34e58da5ae2fc0f07796", size = 46969, upload-time = "2026-10-06T10:43:35.321Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/9c/90612659a242e69e748d864f0bff83b5aa9df01b97bb8fdb73cb525a6c5a/scim2_server-0.7.0.tar.gz", hash = "sha256:1670fe198258ddce21e38bb44cca1b5f98cf8ace1656f878172e0827cb0a9bea", size = 47573, upload-time = "2026-10-06T21:22:49.725Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/5b/bc9982f7bb955cd23a41da8fefdba512605b4a3f2ed955b8f7ec2d630027/scim2_server-0.6.2-py3-none-any.whl", hash = "sha256:2b356a0a6f6caa4e20342f9b564f40a3e1f18aba2d2311faee046f743aa51a39", size = 55052, upload-time = "2026-10-06T10:43:33.926Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/44/daa4afbae69fd2b528d2d92ac3653d79a6578deb24efa01af5d2242905b2/scim2_server-0.7.0-py3-none-any.whl", hash = "sha256:b5d88c68d44e6a5dce00814ddbc3cb05b42a3f3542f9802add93104bf38cdc51", size = 55981, upload-time = "2026-10-06T21:22:48.383Z" },
 ]
 
 [package.optional-dependencies]
@@ -1346,8 +1346,8 @@ doc = [
 
 [package.metadata]
 requires-dist = [
-    { name = "scim2-models", specifier = ">=0.10.6" },
-    { name = "scim2-server", specifier = ">=0.6.2" },
+    { name = "scim2-models", specifier = ">=0.12.0" },
+    { name = "scim2-server", specifier = ">=0.7.0" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'asyncio'", specifier = ">=2.0.41" },
 ]
@@ -1363,7 +1363,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-postgresql", specifier = ">=9.1.0" },
     { name = "scim2-client", specifier = ">=0.11.2" },
-    { name = "scim2-server", extras = ["testing"], specifier = ">=0.6.2" },
+    { name = "scim2-server", extras = ["testing"], specifier = ">=0.7.0" },
     { name = "scim2-tester", specifier = ">=0.5.2" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.41" },
     { name = "tox-uv", specifier = ">=1.36.0" },
