@@ -65,6 +65,8 @@ FILTERS = [
     "active eq true",
     "active eq false",
     "not (active eq true)",
+    "active ne true",
+    'meta.created co "20"',
     "active pr",
     "emails pr",
     'emails eq "alice@work.example"',

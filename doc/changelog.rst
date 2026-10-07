@@ -17,3 +17,5 @@ Added
   database. The asynchronous storage needs the ``asyncio`` extra.
 - :meth:`ResourceMapping.schemas <scim2_sqlalchemy.ResourceMapping.schemas>`, which publishes the
   attributes a mapping stores.
+- Filters, sorts and uniqueness checks compare strings with the comparison key of the policy of
+  the provider: exactly on SQLite, and approximately on PostgreSQL.

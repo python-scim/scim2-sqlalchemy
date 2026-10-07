@@ -23,7 +23,6 @@ from sqlalchemy import and_
 from sqlalchemy import false
 from sqlalchemy import func
 from sqlalchemy import inspect
-from sqlalchemy import literal
 from sqlalchemy import not_
 from sqlalchemy import nulls_first
 from sqlalchemy import nulls_last
@@ -32,6 +31,8 @@ from sqlalchemy import select
 from sqlalchemy import true
 from sqlalchemy.orm import Mapper
 
+from .comparison import _SUBSTRINGS
+from .comparison import _Comparator
 from .conversion import _as_stored
 from .mapping import ResourceMapping
 from .mapping import _Collection
@@ -44,21 +45,6 @@ _ORDERINGS: dict[CompareOperator, Callable[[Any, Any], Any]] = {
     CompareOperator.lt: operator.lt,
     CompareOperator.le: operator.le,
 }
-
-_SUBSTRINGS = {
-    CompareOperator.co: "contains",
-    CompareOperator.sw: "startswith",
-    CompareOperator.ew: "endswith",
-}
-
-_ESCAPE = "/"
-
-
-def _escape(value: str) -> str:
-    """Escape the LIKE wildcards of a value, so that they match themselves."""
-    for character in (_ESCAPE, "%", "_"):
-        value = value.replace(character, _ESCAPE + character)
-    return value
 
 
 def _as_key(column: _Column, value: Any) -> Any:
@@ -92,10 +78,12 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         self,
         mapping: ResourceMapping,
         scim_filter: ScimFilter[Any],
+        comparator: _Comparator,
         scope: tuple[AttrPath, _Collection] | None = None,
     ) -> None:
         self.mapping = mapping
         self.filter = scim_filter
+        self.comparator = comparator
         self.scope = scope
 
     def _path(self, attr_path: AttrPath) -> AttrPath:
@@ -133,9 +121,10 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
             and collection is not None
             and self.scope is None
         ):
-            equal = _compare(column, CompareOperator.eq, value)
+            equal = _compare(self.comparator, column, CompareOperator.eq, value)
             return not_(collection.exists(equal))
-        return self._in_collection(collection, _compare(column, node.op, value))
+        condition = _compare(self.comparator, column, node.op, value)
+        return self._in_collection(collection, condition)
 
     def visit_present(self, node: Present) -> ColumnElement[bool]:
         binding = self.filter.resolve(self._path(node.attr_path), strict=False)
@@ -169,7 +158,7 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         if collection is None:
             raise _unmapped(binding)
         scoped = _FilterTranslator(
-            self.mapping, self.filter, (node.attr_path, collection)
+            self.mapping, self.filter, self.comparator, (node.attr_path, collection)
         )
         return collection.exists(scoped.visit(node.val_filter))
 
@@ -182,8 +171,14 @@ def _present(column: _Column) -> ColumnElement[bool]:
     return expression.is_not(None)
 
 
-def _compare(column: _Column, op: CompareOperator, value: Any) -> ColumnElement[bool]:
-    """Compare a column with a value, following the case sensitivity of the attribute."""
+def _compare(
+    comparator: _Comparator, column: _Column, op: CompareOperator, value: Any
+) -> ColumnElement[bool]:
+    """Compare a column with a value, strings in the form the policy compares them under.
+
+    A string the policy cannot prepare is equal to no other value, so only ne
+    holds against it.
+    """
     expression = column.compared
     value = _as_stored(value)
     if value is None:
@@ -193,24 +188,32 @@ def _compare(column: _Column, op: CompareOperator, value: Any) -> ColumnElement[
             return expression.is_not(None)
         return false()
 
-    # Both sides are lowered by the database, so that a value always matches
-    # itself, even where the database only lowers ASCII letters.
-    def side(value: Any) -> Any:
-        return func.lower(literal(value)) if column.casefolded else value
+    if not column.is_string:
+        if op == CompareOperator.ne:
+            return or_(expression.is_(None), expression != value)
+        if op in _SUBSTRINGS:
+            return false()
+        return and_(expression.is_not(None), _ORDERINGS[op](expression, value))
 
-    left = func.lower(expression) if column.casefolded else expression
+    try:
+        column.binding.comparable(value, comparator.policy)
+    except ValueError:
+        return true() if op == CompareOperator.ne else false()
+
+    left = comparator.column(column)
     if op == CompareOperator.ne:
-        return or_(expression.is_(None), left != side(value))
+        return or_(left.is_(None), left != comparator.operand(column, value))
     if op in _SUBSTRINGS:
-        pattern = side(_escape(value))
-        condition = getattr(left, _SUBSTRINGS[op])(pattern, escape=_ESCAPE)
+        condition = comparator.substring(op, column, value)
     else:
-        condition = _ORDERINGS[op](left, side(value))
-    return and_(expression.is_not(None), condition)
+        condition = _ORDERINGS[op](left, comparator.operand(column, value))
+    return and_(left.is_not(None), condition)
 
 
 def _order_by(
-    mapping: ResourceMapping, search_request: SearchRequest[Any]
+    mapping: ResourceMapping,
+    search_request: SearchRequest[Any],
+    comparator: _Comparator,
 ) -> list[Any]:
     """Return the ORDER BY terms of a search, the record identifier last.
 
@@ -231,8 +234,8 @@ def _order_by(
                 detail=f"Cannot sort on '{binding.urn}'",
             )
         expression: Any = column.expression
-        if column.casefolded:
-            expression = func.lower(expression)
+        if column.is_string:
+            expression = comparator.column(column)
         if collection is not None:
             expression = _first_entry(collection, expression)
         # Per RFC 7644 §3.4.2.3, resources without a value come last when
@@ -264,24 +267,28 @@ def _first_entry(collection: _Collection, expression: Any) -> Any:
 
 
 def _where(
-    mapping: ResourceMapping, search_request: SearchRequest[Any]
+    mapping: ResourceMapping,
+    search_request: SearchRequest[Any],
+    comparator: _Comparator,
 ) -> ColumnElement[bool]:
     if search_request.filter is None:
         return true()
     scim_filter = ScimFilter[mapping.model](str(search_request.filter))  # type: ignore[name-defined]
-    return _FilterTranslator(mapping, scim_filter).visit(scim_filter.ast)
+    return _FilterTranslator(mapping, scim_filter, comparator).visit(scim_filter.ast)
 
 
 def _search_statements(
-    mapping: ResourceMapping, search_request: SearchRequest[Any]
+    mapping: ResourceMapping,
+    search_request: SearchRequest[Any],
+    comparator: _Comparator,
 ) -> tuple[Select[tuple[int]], Select[Any]]:
     """Return the statement counting the matching records, and the one selecting a page of them."""
-    condition = _where(mapping, search_request)
+    condition = _where(mapping, search_request, comparator)
     count = select(func.count()).select_from(mapping.record).where(condition)
     page = (
         select(mapping.record)
         .where(condition)
-        .order_by(*_order_by(mapping, search_request))
+        .order_by(*_order_by(mapping, search_request, comparator))
         .options(*mapping._loader_options())
         .offset(search_request.start_index_0 or 0)
     )
@@ -306,10 +313,14 @@ def _load_statement(
 
 
 def _taken_statement(
-    mapping: ResourceMapping, column: _Column, value: Any, resource_id: str | None
+    mapping: ResourceMapping,
+    column: _Column,
+    value: Any,
+    resource_id: str | None,
+    comparator: _Comparator,
 ) -> Select[Any]:
     """Return the statement finding another record holding a unique value."""
-    condition = _compare(column, CompareOperator.eq, value)
+    condition = _compare(comparator, column, CompareOperator.eq, value)
     key = None if resource_id is None else _as_key(mapping._id, resource_id)
     if key is not None:
         condition = and_(condition, mapping._id.expression != key)

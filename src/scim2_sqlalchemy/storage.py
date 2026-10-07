@@ -17,6 +17,7 @@ from scim2_models import Path
 from scim2_models import PreconditionFailedException
 from scim2_models import Resource
 from scim2_models import ResourceType
+from scim2_models import ScimPolicy
 from scim2_models import ScimProvider
 from scim2_models import SearchRequest
 from scim2_models import UniquenessException
@@ -28,6 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
+from .comparison import _Comparator
+from .comparison import _comparator
 from .conversion import _check_storable
 from .conversion import _from_scim
 from .conversion import _link_ids
@@ -65,6 +68,8 @@ class _StorageBase:
         self.mappings = dict(mappings)
         self.clock = clock or _utcnow
         self.provider = provider
+        self._policy = provider.policy if provider else ScimPolicy()
+        self._comparators: dict[str, _Comparator] = {}
         self._endpoints = {
             str(resource_type.name): str(resource_type.endpoint).strip("/")
             for resource_type in (provider.resource_types if provider else ())
@@ -124,9 +129,17 @@ class _StorageBase:
         ):
             raise PreconditionFailedException
 
+    def _comparator(self, dialect: str) -> _Comparator:
+        """Return how a database compares strings, built once for each dialect."""
+        if dialect not in self._comparators:
+            self._comparators[dialect] = _comparator(
+                dialect, self._policy, self.mappings.values()
+            )
+        return self._comparators[dialect]
+
     @staticmethod
     def _unique_statements(
-        mapping: ResourceMapping, resource: Resource[Any]
+        mapping: ResourceMapping, resource: Resource[Any], comparator: _Comparator
     ) -> Iterator[Select[Any]]:
         """Yield the statements finding another record holding a unique value of the resource.
 
@@ -135,7 +148,7 @@ class _StorageBase:
         for column in mapping._unique_columns():
             value = Path(column.binding.urn).get(resource, strict=False)
             if value is not None:
-                yield _taken_statement(mapping, column, value, resource.id)
+                yield _taken_statement(mapping, column, value, resource.id, comparator)
 
     @staticmethod
     def _check_links(
@@ -200,7 +213,8 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     :param provider: The provider of the server. The storage then returns
         instances of its models, rather than of the models of the mappings,
         and gives each link a ``$ref`` relative to the SCIM root, from the
-        endpoints of its resource types.
+        endpoints of its resource types. Strings are compared with the
+        :attr:`~scim2_models.ScimPolicy.comparison_key` of its policy.
     """
 
     def __init__(
@@ -231,8 +245,9 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         self, resource_types: list[ResourceType], search_request: SearchRequest[Any]
     ) -> tuple[int, list[Resource[Any]]]:
         mapping = self._single_mapping(resource_types)
-        count, page = _search_statements(mapping, search_request)
         session = self.session()
+        comparator = self._ready_comparator(session)
+        count, page = _search_statements(mapping, search_request, comparator)
         total = session.scalar(count) or 0
         records = session.scalars(page).all()
         return total, [self._to_scim(resource_types[0], record) for record in records]
@@ -295,9 +310,17 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> None:
         session = self.session()
-        for statement in self._unique_statements(mapping, resource):
+        comparator = self._ready_comparator(session)
+        for statement in self._unique_statements(mapping, resource, comparator):
             if session.scalar(statement) is not None:
                 raise UniquenessException
+
+    def _ready_comparator(self, session: Session) -> _Comparator:
+        """Return how the database of the session compares strings, ready to compare them."""
+        connection = session.connection()
+        comparator = self._comparator(connection.dialect.name)
+        comparator.prepare(connection.connection.driver_connection)
+        return comparator
 
     def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
@@ -347,6 +370,8 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         ``meta.lastModified``. The current date in UTC by default.
     :param provider: The provider of the server. The storage then returns
         instances of its models, rather than of the models of the mappings.
+        Strings are compared with the
+        :attr:`~scim2_models.ScimPolicy.comparison_key` of its policy.
     """
 
     def __init__(
@@ -373,8 +398,9 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         self, resource_types: list[ResourceType], search_request: SearchRequest[Any]
     ) -> tuple[int, list[Resource[Any]]]:
         mapping = self._single_mapping(resource_types)
-        count, page = _search_statements(mapping, search_request)
         session = self.session()
+        comparator = await self._ready_comparator(session)
+        count, page = _search_statements(mapping, search_request, comparator)
         total = await session.scalar(count) or 0
         records = (await session.scalars(page)).all()
         return total, [self._to_scim(resource_types[0], record) for record in records]
@@ -442,9 +468,18 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> None:
         session = self.session()
-        for statement in self._unique_statements(mapping, resource):
+        comparator = await self._ready_comparator(session)
+        for statement in self._unique_statements(mapping, resource, comparator):
             if await session.scalar(statement) is not None:
                 raise UniquenessException
+
+    async def _ready_comparator(self, session: AsyncSession) -> _Comparator:
+        """Return how the database of the session compares strings, ready to compare them."""
+        connection = await session.connection()
+        comparator = self._comparator(connection.dialect.name)
+        raw = await connection.get_raw_connection()
+        await comparator.prepare_async(raw.driver_connection)
+        return comparator
 
     async def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]

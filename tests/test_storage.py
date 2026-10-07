@@ -482,11 +482,11 @@ class TakenMeanwhile:
 
     checked = False
 
-    def _unique_statements(self, mapping, resource):
+    def _unique_statements(self, mapping, resource, comparator):
         if not self.checked:
             self.checked = True
             return iter(())
-        return super()._unique_statements(mapping, resource)
+        return super()._unique_statements(mapping, resource, comparator)
 
 
 def test_a_value_taken_meanwhile_raises_a_409(storage_factory, user_type):

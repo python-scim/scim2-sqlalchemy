@@ -41,18 +41,47 @@ differs from a direct translation in several places:
   while ``emails[value ne "x"]`` holds when one email is not ``x``.
 - A value selection, such as ``emails[type eq "work" and primary eq true]``, applies all its
   conditions to the same entry.
-- A string compares without its case, unless the schema declares it ``caseExact``. The database
-  lowers both sides, with its own rules: SQLite only lowers ASCII letters, and PostgreSQL
-  follows the locale of the database. Neither normalizes Unicode, so a composed ``é`` and a
-  decomposed ``é`` differ. A database index that serves these filters is an index on the
-  lowered column.
-- The ``%`` and ``_`` characters of a ``co``, ``sw`` or ``ew`` value are escaped, so that they
-  match themselves.
+- A string compares in the form the comparison key of the policy gives it. By default, the key
+  normalizes the string to NFC, and lowers it unless the schema declares it ``caseExact``. Each
+  database reproduces the key its own way, as the next section describes.
 
 An attribute the resource type does not declare matches no resource
 (:rfc:`RFC 7644 §3.4.2.1 <7644#section-3.4.2.1>`). An attribute it declares but the mapping does
 not store raises an ``invalidFilter`` error instead: the storage cannot evaluate it, and an empty
 result would be a wrong answer.
+
+Strings compare as the policy says
+----------------------------------
+
+The :attr:`comparison_key <scim2_models.ScimPolicy.comparison_key>` of a
+:class:`~scim2_models.ScimPolicy` gives the form strings are compared in. scim2-models applies it
+in Python, to filters, sorts and PATCH operations. For the reasons behind the key, read
+:doc:`scim2_models:explanation/comparisons`. The storage follows the policy of the provider it
+receives, or the default policy without a provider. It reproduces the key in SQL, as far as the
+database allows:
+
+- SQLite runs Python functions. The storage gives each connection a SQL function that calls the
+  key, so filters, sorts and uniqueness checks compare exactly as in Python, whatever the key.
+  The function runs once for each row, and no index serves it. The ``co``, ``sw`` and ``ew``
+  filters use ``instr()`` and ``substr()``, since the ``LIKE`` of SQLite ignores the case of ASCII
+  letters, even for a ``caseExact`` attribute.
+- PostgreSQL normalizes both sides to NFC with ``normalize()``, and lowers them with ``lower()``.
+  This approaches the default key without reaching it. ``lower()`` follows the locale of the
+  database, and only lowers ASCII letters under the ``C`` locale. Even under a UTF-8 locale, a
+  few letters differ, such as ``İ`` and the final sigma. ``normalize()`` needs PostgreSQL 13 and
+  a database encoded in UTF-8. An index that serves these filters is an index on the same
+  expression. With a key other than the default one, the storage warns that it only approaches
+  the key.
+- Other databases lower both sides with their own ``lower()``. MySQL and MariaDB are not
+  supported: their default collations ignore the case and the accents, even for a ``caseExact``
+  attribute.
+
+Where ``LIKE`` serves the ``co``, ``sw`` and ``ew`` filters, the ``%`` and ``_`` characters of the
+value are escaped, so that they match themselves.
+
+A string the key refuses is equal to no other. A filter comparing an attribute with such a
+string holds only for ``ne``. On SQLite, a stored string the key refuses also matches ``ne``
+only, and sorts with the missing values.
 
 Sorting follows RFC 7644
 ------------------------

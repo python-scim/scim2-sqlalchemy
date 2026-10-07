@@ -390,6 +390,16 @@ class ResourceMapping:
             and sub_field_name is not None
         ]
 
+    def _string_columns(self) -> Iterator[_Column]:
+        """Yield the columns holding strings, those of the collections included."""
+        for column in self._columns.values():
+            if column.is_string:
+                yield column
+        for collection in self._collections.values():
+            for column in collection.columns.values():
+                if column.is_string:
+                    yield column
+
     def _unique_columns(self) -> Iterator[_Column]:
         """Yield the readable columns whose values no two resources share."""
         for column in self._columns.values():

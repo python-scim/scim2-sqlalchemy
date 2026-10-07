@@ -25,7 +25,8 @@ what a search supports:
      - One per search. A search at the root raises
        :class:`~scim2_models.NotImplementedException`.
 
-A string compares without its case, as the database lowers it, unless its attribute is
-``caseExact``. A resource without a
-value sorts last when ascending, and first when descending. An attribute the resource type does
-not declare matches no resource.
+A string compares in the form the comparison key of the policy gives it: exactly on SQLite, and
+approximately on PostgreSQL. :doc:`../explanation` describes each database.
+
+A resource without a value sorts last when ascending, and first when descending. An attribute the
+resource type does not declare matches no resource.
