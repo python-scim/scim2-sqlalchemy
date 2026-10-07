@@ -72,11 +72,9 @@ class _StorageBase:
     def __init__(
         self,
         mappings: Mapping[str, ResourceMapping],
-        clock: Callable[[], datetime.datetime] | None,
         provider: ScimProvider | None,
     ) -> None:
         self.mappings = dict(mappings)
-        self.clock = clock or _utcnow
         self.provider = provider
         self._policy = provider.policy if provider else ScimPolicy()
         self._comparators: dict[str, _Comparator] = {}
@@ -198,7 +196,7 @@ class _StorageBase:
         """
         mapping = self._mapping(resource_type)
         record = mapping.record()
-        now = self.clock()
+        now = _utcnow()
         setattr(record, mapping._created.key, now)
         setattr(record, mapping._last_modified.key, now)
         return record
@@ -210,8 +208,13 @@ class _StorageBase:
         record: Any,
         links: dict[_Collection, list[Any]],
     ) -> None:
+        """Write a resource in its record, and date the write.
+
+        The date changes the row even when only links change, such as the
+        members of a group, so that the version changes too.
+        """
         _from_scim(mapping, resource, record, links, creating=False)
-        setattr(record, mapping._last_modified.key, self.clock())
+        setattr(record, mapping._last_modified.key, _utcnow())
 
 
 class SqlAlchemyStorage(_StorageBase, ScimStorage):
@@ -230,8 +233,6 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     :param mappings: The mapping of each resource type, by resource type name.
     :param session: Return the current :class:`~sqlalchemy.orm.Session`, such
         as a :class:`~sqlalchemy.orm.scoped_session`.
-    :param clock: Return the date of a write, for ``meta.created`` and
-        ``meta.lastModified``. The current date in UTC by default.
     :param provider: The provider of the server. The storage then returns
         instances of its models, rather than of the models of the mappings,
         and gives each link a ``$ref`` relative to the SCIM root, from the
@@ -243,10 +244,9 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         self,
         mappings: Mapping[str, ResourceMapping],
         session: Callable[[], Session],
-        clock: Callable[[], datetime.datetime] | None = None,
         provider: ScimProvider | None = None,
     ) -> None:
-        super().__init__(mappings, clock, provider)
+        super().__init__(mappings, provider)
         self.session = session
 
     @contextmanager
@@ -418,8 +418,6 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     :param session: Return the current
         :class:`~sqlalchemy.ext.asyncio.AsyncSession`, such as an
         :class:`~sqlalchemy.ext.asyncio.async_scoped_session`.
-    :param clock: Return the date of a write, for ``meta.created`` and
-        ``meta.lastModified``. The current date in UTC by default.
     :param provider: The provider of the server. The storage then returns
         instances of its models, rather than of the models of the mappings.
         Strings are compared with the
@@ -430,10 +428,9 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         self,
         mappings: Mapping[str, ResourceMapping],
         session: Callable[[], AsyncSession],
-        clock: Callable[[], datetime.datetime] | None = None,
         provider: ScimProvider | None = None,
     ) -> None:
-        super().__init__(mappings, clock, provider)
+        super().__init__(mappings, provider)
         self.session = session
 
     @asynccontextmanager

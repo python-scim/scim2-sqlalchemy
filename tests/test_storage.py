@@ -538,6 +538,18 @@ def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter,
     assert total == (1 if found else 0)
 
 
+def test_a_change_of_links_only_changes_the_version(storage, user_type, group_type):
+    """Adding a member only writes the association table, yet the group gets a new version."""
+    bob = storage.create(user_type, User(user_name="bob"))
+    group = storage.create(group_type, Group(display_name="Admins"))
+    group.members = [{"value": bob.id}]
+
+    updated = storage.update(group_type, group)
+
+    assert updated.meta.version != group.meta.version
+    assert updated.meta.last_modified > group.meta.last_modified
+
+
 class ChangedMeanwhile:
     """Make the record look loaded at another version, as when another transaction changes it right before the write."""
 

@@ -35,8 +35,8 @@ types. Use a UUID, with the :class:`~sqlalchemy.types.Uuid` type, or a sequence 
 table shares.
 
 The primary key may be an integer, a string or a UUID, and the storage returns it as a string.
-The storage does not fill the key: give its column a default, such as ``default=uuid.uuid4``, a
-server default, or an autoincrement. The storage reads the key the database gives.
+Give its column a default, such as ``default=uuid.uuid4``, a server default, or an
+autoincrement, so that the database fills the key of each new resource.
 
 Map a column
 ------------
