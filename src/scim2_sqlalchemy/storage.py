@@ -6,13 +6,13 @@ from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from typing import Any
 
 from scim2_models import InvalidValueException
 from scim2_models import NotFoundException
-from scim2_models import NotImplementedException
 from scim2_models import Path
 from scim2_models import PreconditionFailedException
 from scim2_models import Resource
@@ -39,14 +39,25 @@ from .conversion import _to_scim
 from .conversion import _version
 from .mapping import ResourceMapping
 from .mapping import _Collection
+from .query import _as_key
 from .query import _links_statement
 from .query import _load_statement
+from .query import _records_statement
+from .query import _root_statements
 from .query import _search_statements
 from .query import _taken_statement
 
 
 def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def _by_position(rows: Sequence[Any]) -> dict[int, list[str]]:
+    """Group the identifiers of a page at the root by position of their resource type."""
+    ids: dict[int, list[str]] = {}
+    for position, record_id in rows:
+        ids.setdefault(position, []).append(record_id)
+    return ids
 
 
 def _nothing() -> None:
@@ -88,12 +99,26 @@ class _StorageBase:
     def _mapping(self, resource_type: ResourceType) -> ResourceMapping:
         return self.mappings[resource_type.name]  # type: ignore[index]
 
-    def _single_mapping(self, resource_types: list[ResourceType]) -> ResourceMapping:
-        if len(resource_types) != 1:
-            raise NotImplementedException(
-                detail="Searching several resource types at once is not supported"
+    def _root_page(
+        self,
+        resource_types: list[ResourceType],
+        rows: Sequence[Any],
+        records: dict[tuple[int, str], Any],
+        search_request: SearchRequest[Any],
+    ) -> list[Resource[Any]]:
+        """Build the resources of a page at the root, in the order of the page.
+
+        records holds the loaded records by position of their resource type
+        and identifier as text. A record deleted after the page was selected
+        is left out.
+        """
+        return [
+            self._to_scim(
+                resource_types[position], records[position, record_id], search_request
             )
-        return self._mapping(resource_types[0])
+            for position, record_id in rows
+            if (position, record_id) in records
+        ]
 
     def _model(self, resource_type: ResourceType) -> type[Resource[Any]]:
         """Return the model of the resources of a resource type: the one of the provider, if any."""
@@ -189,7 +214,14 @@ class _StorageBase:
             and id_column.server_default is None
             and id_column is not id_column.table.autoincrement_column
         ):
-            setattr(record, mapping._id.key, self.generate_id(resource_type, resource))
+            generated = self.generate_id(resource_type, resource)
+            key = _as_key(mapping._id, generated)
+            if key is None:
+                raise ValueError(
+                    f"The identifier {generated!r} does not fit the column "
+                    f"of '{mapping._id.key}'"
+                )
+            setattr(record, mapping._id.key, key)
         now = self.clock()
         setattr(record, mapping._created.key, now)
         setattr(record, mapping._last_modified.key, now)
@@ -211,8 +243,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
 
     The storage never commits: committing the request is left to the
     application. Each write is :ref:`flushed <sqlalchemy:session_flushing>`, so that the database fills the
-    identifiers and checks its constraints. Searching several resource types
-    at once raises :class:`~scim2_models.NotImplementedException`.
+    identifiers and checks its constraints.
 
     A change the mappings cannot store raises an error rather than being lost:
     :class:`~scim2_models.InvalidValueException` for an attribute no mapping
@@ -266,16 +297,29 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     def search(
         self, resource_types: list[ResourceType], search_request: SearchRequest[Any]
     ) -> tuple[int, list[Resource[Any]]]:
-        mapping = self._single_mapping(resource_types)
+        if not resource_types:
+            return 0, []
         session = self.session()
         comparator = self._ready_comparator(session)
-        count, page = _search_statements(mapping, search_request, comparator)
+        mappings = [self._mapping(resource_type) for resource_type in resource_types]
+        if len(mappings) == 1:
+            count, page = _search_statements(mappings[0], search_request, comparator)
+            total = session.scalar(count) or 0
+            found = session.scalars(page).all()
+            return total, [
+                self._to_scim(resource_types[0], record, search_request)
+                for record in found
+            ]
+
+        count, statement = _root_statements(mappings, search_request, comparator)
         total = session.scalar(count) or 0
-        records = session.scalars(page).all()
-        resource_type = resource_types[0]
-        return total, [
-            self._to_scim(resource_type, record, search_request) for record in records
-        ]
+        rows = session.execute(statement).all()
+        records = {}
+        for position, ids in _by_position(rows).items():
+            loading = _records_statement(mappings[position], ids, search_request)
+            for record_id, record in session.execute(loading):
+                records[position, record_id] = record
+        return total, self._root_page(resource_types, rows, records, search_request)
 
     def create(
         self, resource_type: ResourceType, resource: Resource[Any]
@@ -435,16 +479,29 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     async def search(
         self, resource_types: list[ResourceType], search_request: SearchRequest[Any]
     ) -> tuple[int, list[Resource[Any]]]:
-        mapping = self._single_mapping(resource_types)
+        if not resource_types:
+            return 0, []
         session = self.session()
         comparator = await self._ready_comparator(session)
-        count, page = _search_statements(mapping, search_request, comparator)
+        mappings = [self._mapping(resource_type) for resource_type in resource_types]
+        if len(mappings) == 1:
+            count, page = _search_statements(mappings[0], search_request, comparator)
+            total = await session.scalar(count) or 0
+            found = (await session.scalars(page)).all()
+            return total, [
+                self._to_scim(resource_types[0], record, search_request)
+                for record in found
+            ]
+
+        count, statement = _root_statements(mappings, search_request, comparator)
         total = await session.scalar(count) or 0
-        records = (await session.scalars(page)).all()
-        resource_type = resource_types[0]
-        return total, [
-            self._to_scim(resource_type, record, search_request) for record in records
-        ]
+        rows = (await session.execute(statement)).all()
+        records = {}
+        for position, ids in _by_position(rows).items():
+            loading = _records_statement(mappings[position], ids, search_request)
+            for record_id, record in await session.execute(loading):
+                records[position, record_id] = record
+        return total, self._root_page(resource_types, rows, records, search_request)
 
     async def create(
         self, resource_type: ResourceType, resource: Resource[Any]

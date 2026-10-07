@@ -8,6 +8,7 @@ from scim2_models import ScimPolicy
 from scim2_models import default_comparison_key
 from scim2_models.path import CompareOperator
 from sqlalchemy import ColumnElement
+from sqlalchemy import String
 from sqlalchemy import func
 from sqlalchemy import literal
 from sqlalchemy import literal_column
@@ -80,9 +81,11 @@ class _Normalizer(_Comparator):
     """
 
     def _form(self, column: _Column, expression: Any) -> ColumnElement[Any]:
-        normalized = func.normalize(expression, literal_column("NFC"))
+        normalized = func.normalize(expression, literal_column("NFC"), type_=String)
         if column.casefolded:
-            normalized = func.normalize(func.lower(normalized), literal_column("NFC"))
+            normalized = func.normalize(
+                func.lower(normalized), literal_column("NFC"), type_=String
+            )
         return normalized.collate("C")
 
     def column(self, column: _Column) -> ColumnElement[Any]:
@@ -124,7 +127,7 @@ class _KeyFunction(_Comparator):
 
     def column(self, column: _Column) -> ColumnElement[Any]:
         key: ColumnElement[Any] = getattr(func, _KEY_FUNCTION)(
-            literal(column.binding.urn), column.compared
+            literal(column.binding.urn), column.compared, type_=String
         )
         return key
 

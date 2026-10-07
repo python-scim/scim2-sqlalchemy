@@ -27,7 +27,14 @@ The project model of the intranet has these columns:
    :language: python
    :pyobject: ProjectRecord
 
-The primary key may be an integer or a string. The storage returns it as a string, and filters
+Per :rfc:`RFC 7643 §3.1 <7643#section-3.1>`, two resources never share an ``id``, even of
+different types. A search at the root of the server returns the resources of every type
+together, and clients tell them apart by their ``id``. The integers of an autoincrement column
+start again in each table, so they break this rule as soon as the server serves two resource
+types. Use a UUID, with the :class:`~sqlalchemy.types.Uuid` type, or a sequence that every
+table shares.
+
+The primary key may be an integer, a string or a UUID. The storage returns it as a string, and filters
 compare it as text. When the database fills the key, with an autoincrement or a default, the
 storage reads the key it gives. Otherwise, the storage generates one with
 :meth:`~scim2_sqlalchemy.SqlAlchemyStorage.generate_id`, a random hexadecimal string. Override
@@ -252,7 +259,7 @@ Create a project owned by a user:
    ...     "/v2/Projects", json={"code": "APOLLO", "owner": {"value": user["id"]}}
    ... ).json
    >>> project["owner"]
-   {'value': '1', '$ref': 'http://localhost/v2/Users/1', 'display': 'bjensen'}
+   {'value': '...', '$ref': 'http://localhost/v2/Users/...', 'display': 'bjensen'}
    >>> session.close()
    >>> engine.dispose()
 

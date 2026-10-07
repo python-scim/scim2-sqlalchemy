@@ -1,4 +1,5 @@
 import datetime
+import uuid
 
 import pytest
 from scim2_models import EnterpriseUser
@@ -8,7 +9,6 @@ from scim2_models import InvalidPathException
 from scim2_models import InvalidValueException
 from scim2_models import MutabilityException
 from scim2_models import NotFoundException
-from scim2_models import NotImplementedException
 from scim2_models import PreconditionFailedException
 from scim2_models import SearchRequest
 from scim2_models import UniquenessException
@@ -398,12 +398,6 @@ def test_an_attribute_stored_nowhere_is_not_sorted_on(storage, user_type, sort_b
         search(storage, user_type, sort_by=sort_by)
 
 
-def test_a_search_at_the_root_is_not_supported(storage, user_type, group_type):
-    """Several resource types live in several tables."""
-    with pytest.raises(NotImplementedException):
-        storage.search([user_type, group_type], SearchRequest())
-
-
 def test_a_sort_without_primary_uses_the_first_entry(storage_factory, user_type):
     """Without a primary column, the first entry orders the resource."""
     users = ResourceMapping(
@@ -507,13 +501,56 @@ def test_another_integrity_error_goes_through(storage_factory, user_type):
 def test_a_deletion_the_database_refuses_raises(storage_factory, session, user_type):
     """A record outside SCIM can keep a resource from being deleted."""
     now = datetime.datetime.now(datetime.UTC)
-    session.add(UserRecord(id="1", user_name="bjensen", created=now, last_modified=now))
+    user_id = uuid.uuid4()
+    session.add(
+        UserRecord(id=user_id, user_name="bjensen", created=now, last_modified=now)
+    )
     session.flush()
-    session.add(BadgeRecord(user_id="1"))
+    session.add(BadgeRecord(user_id=user_id))
     session.commit()
 
     with pytest.raises(IntegrityError):
-        storage_factory().delete(user_type, "1")
+        storage_factory().delete(user_type, str(user_id))
+
+
+class InvalidIds:
+    """Generate identifiers that are not UUIDs."""
+
+    def generate_id(self, resource_type, resource):
+        return "user-1"
+
+
+def test_a_generated_identifier_must_fit_the_column(storage_factory, user_type):
+    """A UUID column cannot hold any string, so generate_id must return a UUID."""
+    storage = storage_factory(mixins=[InvalidIds])
+
+    with pytest.raises(ValueError, match="user-1"):
+        storage.create(user_type, User(user_name="bjensen"))
+
+
+@pytest.mark.parametrize(
+    ("scim_filter", "found"),
+    [
+        ('id eq "{id}"', True),
+        ('id eq "{hex}"', False),
+        ('id eq "{upper}"', False),
+        ('id eq "bjensen"', False),
+        ('id ne "{id}"', False),
+        ('id ne "bjensen"', True),
+        ('id co "{part}"', True),
+    ],
+)
+def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter, found):
+    """A UUID identifier is found by the text the storage returns, and by no other spelling."""
+    user = storage.create(user_type, User(user_name="bjensen"))
+    user_id = uuid.UUID(user.id)
+    scim_filter = scim_filter.format(
+        id=user.id, hex=user_id.hex, upper=user.id.upper(), part=user.id[9:13]
+    )
+
+    total, _ = search(storage, user_type, filter=scim_filter)
+
+    assert total == (1 if found else 0)
 
 
 class ChangedMeanwhile:

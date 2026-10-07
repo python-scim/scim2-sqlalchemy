@@ -27,8 +27,6 @@ into error responses:
    * - :class:`~scim2_models.InvalidPathException`
      - The search sorts on an attribute the mapping does not store, or on a
        :class:`~scim2_sqlalchemy.Link`.
-   * - :class:`~scim2_models.NotImplementedException`
-     - The search covers several resource types.
 
 An integrity error of the database other than a unique value already taken goes through as a
 :class:`sqlalchemy.exc.IntegrityError`.

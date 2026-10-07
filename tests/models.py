@@ -1,11 +1,11 @@
 import datetime
+import uuid
 
 from scim2_models import EnterpriseUser
 from scim2_models import Group
 from scim2_models import User
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
-from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import func
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -37,7 +37,7 @@ membership = Table(
 class UserRecord(Base):
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     external_id: Mapped[str | None]
     user_name: Mapped[str] = mapped_column(unique=True)
     display_name: Mapped[str | None]
@@ -48,7 +48,7 @@ class UserRecord(Base):
     status: Mapped[str | None]
     password_hash: Mapped[str | None]
     employee_number: Mapped[str | None]
-    manager_id: Mapped[str | None] = mapped_column(
+    manager_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
     created: Mapped[datetime.datetime]
@@ -99,7 +99,9 @@ class EmailRecord(Base):
     __tablename__ = "emails"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
     value: Mapped[str | None]
     type: Mapped[str | None]
     primary: Mapped[bool | None]
@@ -128,7 +130,7 @@ class BadgeRecord(Base):
     __tablename__ = "badges"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
 
 
 def users_mapping(changes=None):

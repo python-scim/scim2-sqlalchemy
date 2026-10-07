@@ -14,7 +14,8 @@ Added
 - :class:`~scim2_sqlalchemy.SqlAlchemyStorage` and
   :class:`~scim2_sqlalchemy.AsyncSqlAlchemyStorage`, which serve the mappings to
   :doc:`scim2-server <scim2_server:index>`. They filter, sort and page the resources in the
-  database. The asynchronous storage needs the ``asyncio`` extra.
+  database, on one resource type or at the root of the server. The asynchronous storage needs
+  the ``asyncio`` extra.
 - :meth:`ResourceMapping.schemas <scim2_sqlalchemy.ResourceMapping.schemas>`, which publishes the
   attributes a mapping stores.
 - Filters, sorts and uniqueness checks compare strings with the comparison key of the policy of

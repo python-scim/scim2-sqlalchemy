@@ -3,6 +3,7 @@
 import datetime
 import hashlib
 import os
+import uuid
 
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
@@ -38,7 +39,7 @@ team_members = Table(
 class Account(Base):
     __tablename__ = "accounts"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     external_id: Mapped[str | None]
     login: Mapped[str] = mapped_column(unique=True)
     first_name: Mapped[str | None]
@@ -87,7 +88,7 @@ class EmailAddress(Base):
     __tablename__ = "email_addresses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"))
     address: Mapped[str]
     kind: Mapped[str | None]
     preferred: Mapped[bool | None]
@@ -96,7 +97,7 @@ class EmailAddress(Base):
 class Team(Base):
     __tablename__ = "teams"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     external_id: Mapped[str | None]
     name: Mapped[str]
     created_at: Mapped[datetime.datetime]

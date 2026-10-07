@@ -1,6 +1,7 @@
 """Serve the projects of the intranet, a resource type of its own, and the office of each account."""
 
 import datetime
+import uuid
 from typing import Annotated
 
 from pydantic import Field
@@ -72,7 +73,7 @@ class ProjectRecord(Base):
     created_at: Mapped[datetime.datetime]
     updated_at: Mapped[datetime.datetime]
     revision: Mapped[int] = mapped_column()
-    owner_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"))
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("accounts.id"))
 
     owner: Mapped[Account | None] = relationship()
     members: Mapped[list[Account]] = relationship(secondary=project_members)

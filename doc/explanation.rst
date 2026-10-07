@@ -97,6 +97,12 @@ The storage always ends the order with the identifier of the record. Two resourc
 sort value would otherwise come back in any order, and a resource could appear on two pages, or
 on none.
 
+A search at the root of the server sorts and pages the resources of every type as one
+collection. The storage unites the tables in one SQL query, which returns the resource type and
+the identifier of each resource of the page. It then loads the records of each type. A resource
+type without the sort attribute sorts its resources as having no value. Between two resources of
+different types that share a sort value, the order of the resource types decides.
+
 Writes that cannot be stored are refused
 ----------------------------------------
 
@@ -166,11 +172,6 @@ send the same queries.
 
 Limits
 ------
-
-The storage serves one resource type per search. A search at the root of the server, on every
-resource type at once, gets a 501 error, which :rfc:`RFC 7644 §3.12 <7644#section-3.12>` allows
-for an unsupported operation. The resources of several types live in several tables, with
-nothing in common to sort or page on.
 
 The storage pages with ``startIndex`` and ``count``. It does not support the cursors of
 :rfc:`9865`.

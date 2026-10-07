@@ -22,8 +22,7 @@ what a search supports:
    * - Pagination
      - ``startIndex`` and ``count``. Cursors are not supported.
    * - Resource types
-     - One per search. A search at the root raises
-       :class:`~scim2_models.NotImplementedException`.
+     - One, or every resource type for a search at the root of the server.
 
 A string compares in the form the comparison key of the policy gives it: exactly on SQLite, and
 approximately on PostgreSQL. :doc:`../explanation` describes each database.

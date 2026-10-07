@@ -20,16 +20,21 @@ from scim2_models.path import ValuePath
 from scim2_models.path import coerce_value
 from sqlalchemy import ColumnElement
 from sqlalchemy import Select
+from sqlalchemy import String
 from sqlalchemy import and_
+from sqlalchemy import cast
 from sqlalchemy import false
 from sqlalchemy import func
 from sqlalchemy import inspect
+from sqlalchemy import literal
 from sqlalchemy import not_
+from sqlalchemy import null
 from sqlalchemy import nulls_first
 from sqlalchemy import nulls_last
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import true
+from sqlalchemy import union_all
 from sqlalchemy.orm import Mapper
 
 from .comparison import _SUBSTRINGS
@@ -58,6 +63,18 @@ def _as_key(column: _Column, value: Any) -> Any:
         return python_type(value)
     except (TypeError, ValueError):
         return None
+
+
+def _exact_key(column: _Column, value: str) -> Any:
+    """Return an identifier in the type of its column, or None when the column holds no such identifier.
+
+    The column holds it only when it would return the same text, so "01"
+    does not find the identifier 1.
+    """
+    key = _as_key(column, value)
+    if key is None or str(key) != value:
+        return None
+    return key
 
 
 def _unmapped(binding: AttributeBinding) -> InvalidFilterException:
@@ -189,6 +206,17 @@ def _compare(
             return expression.is_not(None)
         return false()
 
+    if column.textual and op in (CompareOperator.eq, CompareOperator.ne):
+        # The identifier is compared in its own type, so that the database
+        # uses its index, and does not depend on how it writes a UUID as text.
+        key = _exact_key(column, value)
+        if key is None:
+            return true() if op == CompareOperator.ne else false()
+        if op == CompareOperator.ne:
+            return or_(column.expression.is_(None), column.expression != key)
+        equal: ColumnElement[bool] = column.expression == key
+        return equal
+
     if not column.is_string:
         if op == CompareOperator.ne:
             return or_(expression.is_(None), expression != value)
@@ -211,6 +239,44 @@ def _compare(
     return and_(left.is_not(None), condition)
 
 
+def _sort_key(
+    mapping: ResourceMapping,
+    search_request: SearchRequest[Any],
+    comparator: _Comparator,
+) -> Any:
+    """Return the expression the records of a mapping sort on.
+
+    Return None when the search has no sortBy, or when the model of the
+    mapping does not declare its attribute.
+    """
+    binding = search_request.sort_binding(mapping.model)
+    if binding is None:
+        return None
+    collection, column = mapping._lookup(binding)
+    if (
+        column is None
+        or not column.readable
+        or (collection is not None and not collection.owned)
+    ):
+        raise InvalidPathException(
+            path=str(search_request.sort_by),
+            detail=f"Cannot sort on '{binding.urn}'",
+        )
+    expression: Any = column.expression
+    if column.is_string:
+        expression = comparator.column(column)
+    if collection is not None:
+        expression = _first_entry(collection, expression)
+    return expression
+
+
+def _sorted(expression: Any, search_request: SearchRequest[Any]) -> Any:
+    """Per RFC 7644 §3.4.2.3, resources without a value come last when ascending and first when descending."""
+    if search_request.sort_order == SearchRequest.SortOrder.descending:
+        return nulls_first(expression.desc())
+    return nulls_last(expression.asc())
+
+
 def _order_by(
     mapping: ResourceMapping,
     search_request: SearchRequest[Any],
@@ -221,32 +287,9 @@ def _order_by(
     Without the identifier, records sharing a sort value could change pages
     from a request to the next.
     """
-    terms: list[Any] = []
-    binding = search_request.sort_binding(mapping.model)
-    if binding is not None:
-        collection, column = mapping._lookup(binding)
-        if (
-            column is None
-            or not column.readable
-            or (collection is not None and not collection.owned)
-        ):
-            raise InvalidPathException(
-                path=str(search_request.sort_by),
-                detail=f"Cannot sort on '{binding.urn}'",
-            )
-        expression: Any = column.expression
-        if column.is_string:
-            expression = comparator.column(column)
-        if collection is not None:
-            expression = _first_entry(collection, expression)
-        # Per RFC 7644 §3.4.2.3, resources without a value come last when
-        # ascending and first when descending.
-        if search_request.sort_order == SearchRequest.SortOrder.descending:
-            terms.append(nulls_first(expression.desc()))
-        else:
-            terms.append(nulls_last(expression.asc()))
-    terms.append(mapping._id.expression)
-    return terms
+    key = _sort_key(mapping, search_request, comparator)
+    terms = [] if key is None else [_sorted(key, search_request)]
+    return [*terms, mapping._id.expression]
 
 
 def _first_entry(collection: _Collection, expression: Any) -> Any:
@@ -298,6 +341,68 @@ def _search_statements(
     if search_request.count is not None:
         page = page.limit(search_request.count)
     return count, page
+
+
+def _root_statements(
+    mappings: list[ResourceMapping],
+    search_request: SearchRequest[Any],
+    comparator: _Comparator,
+) -> tuple[Select[tuple[int]], Select[tuple[int, str]]]:
+    """Return the statement counting the matching records of several mappings, and the one selecting a page of them.
+
+    The page lists the position of the mapping and the identifier of each
+    record, as text, so that the identifiers of every table fit in one column.
+    A mapping whose model does not declare the sort attribute sorts its
+    records as having no value.
+    """
+    conditions = [_where(mapping, search_request, comparator) for mapping in mappings]
+    keys = [_sort_key(mapping, search_request, comparator) for mapping in mappings]
+    key_type = next((key.type for key in keys if key is not None), None)
+
+    matching = union_all(
+        *(
+            select(literal(1)).select_from(mapping.record).where(condition)
+            for mapping, condition in zip(mappings, conditions, strict=True)
+        )
+    ).subquery()
+    count = select(func.count()).select_from(matching)
+
+    branches = []
+    for position, (mapping, condition, key) in enumerate(
+        zip(mappings, conditions, keys, strict=True)
+    ):
+        columns: list[Any] = [
+            literal(position).label("position"),
+            cast(mapping._id.expression, String).label("id"),
+        ]
+        if key_type is not None:
+            # PostgreSQL needs the type of a NULL to unite it with the keys
+            # of the other tables.
+            key = cast(null(), key_type) if key is None else key
+            columns.append(key.label("key"))
+        branches.append(select(*columns).where(condition))
+    rows = union_all(*branches).subquery()
+    terms = [] if key_type is None else [_sorted(rows.c.key, search_request)]
+    page = (
+        select(rows.c.position, rows.c.id)
+        .order_by(*terms, rows.c.position, rows.c.id)
+        .offset(search_request.start_index_0 or 0)
+    )
+    if search_request.count is not None:
+        page = page.limit(search_request.count)
+    return count, page
+
+
+def _records_statement(
+    mapping: ResourceMapping, ids: list[str], parameters: ResponseParameters[Any]
+) -> Select[tuple[str, Any]]:
+    """Return the statement loading the records of a page, each with its identifier as text."""
+    keys = [_as_key(mapping._id, value) for value in ids]
+    return (
+        select(cast(mapping._id.expression, String), mapping.record)
+        .where(mapping._id.expression.in_(keys))
+        .options(*mapping._loader_options(mapping._returned_collections(parameters)))
+    )
 
 
 def _load_statement(

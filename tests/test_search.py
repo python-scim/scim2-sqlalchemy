@@ -114,7 +114,7 @@ class OrderedIds:
         self.ids = itertools.count()
 
     def generate_id(self, resource_type, resource):
-        return f"{next(self.ids):04}"
+        return f"{next(self.ids):032x}"
 
 
 @pytest.fixture

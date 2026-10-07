@@ -30,8 +30,11 @@ account has a login, a name, a password hash, email addresses and teams:
    :language: python
    :pyobject: Account
 
-The models need three things for SCIM:
+The models need four things for SCIM:
 
+- a primary key unique across the accounts and the teams, here a UUID.
+  Per :rfc:`RFC 7643 §3.1 <7643#section-3.1>`, two resources never share an ``id``, even of
+  different types;
 - a column for the identifier the identity provider gives, here ``external_id``;
 - a creation date and a modification date, here ``created_at`` and ``updated_at``;
 - a :ref:`version counter <sqlalchemy:mapper_version_counter>`, declared as the
@@ -159,8 +162,8 @@ Werkzeug, which calls the application without running a server. Create a user:
    >>> response.status_code
    201
    >>> user = response.json
-   >>> user["id"], user["displayName"], user["active"], "password" in user
-   ('1', 'Barbara Jensen', True, False)
+   >>> user["displayName"], user["active"], "password" in user
+   ('Barbara Jensen', True, False)
 
 The response comes from the new row of the ``accounts`` table. ``displayName`` comes from the
 hybrid property, and ``active`` from the default of the ``active`` column. The password is
@@ -168,8 +171,9 @@ stored hashed:
 
 .. doctest::
 
+   >>> import uuid
    >>> from intranet.models import Account
-   >>> session.get(Account, 1).password_hash.count(":")
+   >>> session.get(Account, uuid.UUID(user["id"])).password_hash.count(":")
    1
 
 Create a group with this user as a member. The member links to the user, with its URL:
@@ -179,10 +183,10 @@ Create a group with this user as a member. The member links to the user, with it
    >>> GROUP = "urn:ietf:params:scim:schemas:core:2.0:Group"
    >>> response = client.post(
    ...     "/v2/Groups",
-   ...     json={"schemas": [GROUP], "displayName": "Admins", "members": [{"value": "1"}]},
+   ...     json={"schemas": [GROUP], "displayName": "Admins", "members": [{"value": user["id"]}]},
    ... )
    >>> response.json["members"]
-   [{'value': '1', '$ref': 'http://localhost/v2/Users/1', 'display': 'Barbara Jensen'}]
+   [{'value': '...', '$ref': 'http://localhost/v2/Users/...', 'display': 'Barbara Jensen'}]
 
 Search the users. The storage turns the filter and the sort into a SQL query, so the database
 only returns the matching rows:
@@ -242,7 +246,7 @@ Next steps
 
 The server now serves the accounts and the teams of the intranet:
 
-- To map other cases, such as extensions, custom resources and integer identifiers, read
+- To map other cases, such as extensions, custom resources and other identifiers, read
   :doc:`how-to/map-a-data-model`.
 - To choose between the restricted schemas and models written by hand, read
   :doc:`how-to/publish-the-stored-attributes`.
