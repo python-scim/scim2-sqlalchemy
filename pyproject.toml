@@ -9,6 +9,7 @@ description = "Painless SCIM integration for SQLAlchemy"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+keywords = ["scim", "scim2", "provisioning", "sqlalchemy", "rfc7643", "rfc7644"]
 authors = [
     { name = "Éloi Rivard", email = "eloi@yaal.coop" }
 ]
