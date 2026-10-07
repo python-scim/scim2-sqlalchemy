@@ -211,22 +211,21 @@ Check the server
 ----------------
 
 :doc:`scim2-tester <scim2_tester:index>` checks that a SCIM server complies with the RFCs. It
-sends the requests an identity provider would send, and checks each response. Install it with
-the Werkzeug engine of :doc:`scim2-client <scim2_client:index>`, which calls the application
-directly:
+sends the requests an identity provider would send, and checks each response. The WSGI engine
+of :doc:`scim2-client <scim2_client:index>` calls the application directly, without a network:
 
 .. code-block:: console
 
-   $ pip install scim2-tester "scim2-client[werkzeug]"
+   $ pip install scim2-tester
 
 Run the checks:
 
 .. doctest::
 
-   >>> from scim2_client.engines.werkzeug import TestSCIMClient
+   >>> from scim2_client.engines.wsgi import WSGISCIMClient
    >>> from scim2_tester import Status
    >>> from scim2_tester import check_server
-   >>> scim_client = TestSCIMClient(client, scim_prefix="/v2", provider=provider)
+   >>> scim_client = WSGISCIMClient(app, base_url="http://localhost/v2", provider=provider)
    >>> results = check_server(scim_client)
    >>> [result.title for result in results if result.status not in (Status.SUCCESS, Status.SKIPPED)]
    []

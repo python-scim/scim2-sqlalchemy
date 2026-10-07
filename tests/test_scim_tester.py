@@ -4,7 +4,7 @@ https://github.com/python-scim/scim2-tester
 """
 
 import pytest
-from scim2_client.engines.werkzeug import TestSCIMClient
+from scim2_client.engines.wsgi import WSGISCIMClient
 from scim2_server.applications.wsgi import WSGIApplication
 from scim2_tester import Status
 from scim2_tester import check_server
@@ -17,8 +17,8 @@ GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
 def scim_client(sync_storage_factory, restricted_provider):
     storage = sync_storage_factory(provider=restricted_provider)
     application = WSGIApplication(storage, restricted_provider)
-    return TestSCIMClient(
-        Client(application), scim_prefix="/v2", provider=restricted_provider
+    return WSGISCIMClient(
+        application, base_url="http://localhost/v2", provider=restricted_provider
     )
 
 
