@@ -58,7 +58,7 @@ GROUPS = ResourceMapping(
 )
 
 
-def create_provider():
+def create_provider(policy=None):
     return ScimProvider.from_discovery(
         [*USERS.schemas(), *GROUPS.schemas()],
         [
@@ -66,6 +66,7 @@ def create_provider():
             ResourceType.from_resource(GROUPS.model),
         ],
         config=load_default_service_provider_config(),
+        policy=policy,
     )
 
 

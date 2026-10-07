@@ -249,4 +249,6 @@ The server now serves the accounts and the teams of the intranet:
   :doc:`how-to/publish-the-stored-attributes`.
 - To commit the changes of each request, in a synchronous or an asynchronous application, read
   :doc:`how-to/manage-the-transactions`.
+- To compare strings with the PRECIS rules or another custom comparison key, read
+  :doc:`how-to/compare-strings`.
 - For the reasons behind the behavior of the storage, read :doc:`explanation`.

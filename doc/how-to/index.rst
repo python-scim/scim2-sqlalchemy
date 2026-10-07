@@ -10,3 +10,4 @@ the :doc:`../overview`.
    map-a-data-model
    publish-the-stored-attributes
    manage-the-transactions
+   compare-strings

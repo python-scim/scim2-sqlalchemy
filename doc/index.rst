@@ -40,8 +40,8 @@ Start with the page that matches the need:
 
 - To build a SCIM server over the tables of an existing application, follow the
   :doc:`overview`.
-- To map other data models, publish the stored attributes, or commit the changes of each
-  request, read the :doc:`how-to guides <how-to/index>`.
+- To map other data models, publish the stored attributes, commit the changes of each request,
+  or compare strings with a custom comparison key, read the :doc:`how-to guides <how-to/index>`.
 - For the reasons behind the behavior of the storage, read :doc:`explanation`.
 - For the public API, the supported searches and the errors, read the :doc:`reference <reference/index>`.
 

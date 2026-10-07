@@ -41,9 +41,10 @@ differs from a direct translation in several places:
   while ``emails[value ne "x"]`` holds when one email is not ``x``.
 - A value selection, such as ``emails[type eq "work" and primary eq true]``, applies all its
   conditions to the same entry.
-- A string compares in the form the comparison key of the policy gives it. By default, the key
-  normalizes the string to NFC, and lowers it unless the schema declares it ``caseExact``. Each
-  database reproduces the key its own way, as the next section describes.
+- A string compares in the form the comparison key of the policy gives it. By default, the
+  comparison key normalizes the string to NFC, and lowers it unless the schema declares it
+  ``caseExact``. Each database reproduces the comparison key its own way, as the next section
+  describes.
 
 An attribute the resource type does not declare matches no resource
 (:rfc:`RFC 7644 §3.4.2.1 <7644#section-3.4.2.1>`). An attribute it declares but the mapping does
@@ -54,25 +55,25 @@ Strings compare as the policy says
 ----------------------------------
 
 The :attr:`comparison_key <scim2_models.ScimPolicy.comparison_key>` of a
-:class:`~scim2_models.ScimPolicy` gives the form strings are compared in. scim2-models applies it
-in Python, to filters, sorts and PATCH operations. For the reasons behind the key, read
+:class:`~scim2_models.ScimPolicy` gives the form strings are compared in. scim2-models applies it in
+Python, to filters, sorts and PATCH operations. For the reasons behind the comparison key, read
 :doc:`scim2_models:explanation/comparisons`. The storage follows the policy of the provider it
-receives, or the default policy without a provider. It reproduces the key in SQL, as far as the
-database allows:
+receives, or the default policy without a provider. It reproduces the comparison key in SQL, as far
+as the database allows:
 
-- SQLite runs Python functions. The storage gives each connection a SQL function that calls the
-  key, so filters, sorts and uniqueness checks compare exactly as in Python, whatever the key.
-  The function runs once for each row, and no index serves it. The ``co``, ``sw`` and ``ew``
-  filters use ``instr()`` and ``substr()``, since the ``LIKE`` of SQLite ignores the case of ASCII
-  letters, even for a ``caseExact`` attribute.
+- SQLite runs Python functions. The storage gives each connection a SQL function that calls the key,
+  so filters, sorts and uniqueness checks compare exactly as in Python, whatever the comparison key.
+  The function runs once for each row, and no index serves it. The ``co``, ``sw`` and ``ew`` filters
+  use ``instr()`` and ``substr()``, since the ``LIKE`` of SQLite ignores the case of ASCII letters,
+  even for a ``caseExact`` attribute.
 - PostgreSQL normalizes both sides to NFC with ``normalize()``, and lowers them with ``lower()``.
-  This approaches the default key without reaching it. ``lower()`` follows the locale of the
-  database, and only lowers ASCII letters under the ``C`` locale. Even under a UTF-8 locale, a
-  few letters differ, such as ``İ`` and the final sigma. ``normalize()`` needs PostgreSQL 13 and
-  a database encoded in UTF-8. The comparison uses the ``C`` collation, which orders strings by
-  code point, as scim2-models does, whatever the collation of the column. An index that serves
-  these filters is an index on the same expression, with the same collation. With a key other
-  than the default one, the storage warns that it only approaches the key.
+  This approaches the default comparison key without reaching it. ``lower()`` follows the locale of
+  the database, and only lowers ASCII letters under the ``C`` locale. Even under a UTF-8 locale, a
+  few letters differ, such as ``İ`` and the final sigma. ``normalize()`` needs PostgreSQL 13 and a
+  database encoded in UTF-8. The comparison uses the ``C`` collation, which orders strings by code
+  point, as scim2-models does, whatever the collation of the column. An index that serves these
+  filters is an index on the same expression, with the same collation. With a comparison key other
+  than the default one, the storage warns that it only approaches it.
 - Other databases lower both sides with their own ``lower()``. MySQL and MariaDB are not
   supported: their default collations ignore the case and the accents, even for a ``caseExact``
   attribute.
@@ -80,9 +81,9 @@ database allows:
 Where ``LIKE`` serves the ``co``, ``sw`` and ``ew`` filters, the ``%`` and ``_`` characters of the
 value are escaped, so that they match themselves.
 
-A string the key refuses is equal to no other. A filter comparing an attribute with such a
-string holds only for ``ne``. On SQLite, a stored string the key refuses also matches ``ne``
-only, and sorts with the missing values.
+A string the comparison key refuses is equal to no other. A filter comparing an attribute with such
+a string holds only for ``ne``. On SQLite, a stored string the comparison key refuses also matches
+``ne`` only, and sorts with the missing values.
 
 Sorting follows RFC 7644
 ------------------------
@@ -132,13 +133,12 @@ refuses an entry without ``value``: storing nothing for it would lose the link.
 Versions protect concurrent writes
 ----------------------------------
 
-The version of a resource comes from the
-:ref:`version counter <sqlalchemy:mapper_version_counter>` of its SQLAlchemy model. SQLAlchemy
-increments the column on every write, and adds the version it read to the ``WHERE`` clause of the
-``UPDATE``. The storage first compares the stored version with the one the client sent in
-``If-Match``, and answers 412 when they differ. A write by another transaction between the read
-and the write matches no row: SQLAlchemy raises :exc:`~sqlalchemy.orm.exc.StaleDataError`, which the storage turns into
-a 412 too.
+The version of a resource comes from the :ref:`version counter <sqlalchemy:mapper_version_counter>`
+of its SQLAlchemy model. SQLAlchemy increments the column on every write, and adds the version it
+read to the ``WHERE`` clause of the ``UPDATE``. The storage first compares the stored version with
+the one the client sent in ``If-Match``, and answers 412 when they differ. A write by another
+transaction between the read and the write matches no row: SQLAlchemy raises
+:exc:`~sqlalchemy.orm.exc.StaleDataError`, which the storage turns into a 412 too.
 
 Unique values are checked twice
 -------------------------------
@@ -153,15 +153,16 @@ taken. Any other :exc:`~sqlalchemy.exc.IntegrityError` goes through unchanged.
 The application owns the transaction
 ------------------------------------
 
-The storage :ref:`flushes <sqlalchemy:session_flushing>` each write, so that the database fills the identifiers and checks its
-constraints, and never commits. The application, or its web framework, already decides when a
-request ends and whether its changes are kept. Each operation runs in a :ref:`savepoint <sqlalchemy:session_begin_nested>`, so that a
-failed operation leaves the session usable, and a bulk request goes on after a failure.
+The storage :ref:`flushes <sqlalchemy:session_flushing>` each write, so that the database fills the
+identifiers and checks its constraints, and never commits. The application, or its web framework,
+already decides when a request ends and whether its changes are kept. Each operation runs in a
+:ref:`savepoint <sqlalchemy:session_begin_nested>`, so that a failed operation leaves the session
+usable, and a bulk request goes on after a failure.
 
 The asynchronous storage loads every collection of a record with the record. An
-:class:`~sqlalchemy.ext.asyncio.AsyncSession` cannot load a relationship
-:ref:`lazily <sqlalchemy:asyncio_orm_avoid_lazyloads>`, on first access. Both storages load the same way, so
-they send the same queries.
+:class:`~sqlalchemy.ext.asyncio.AsyncSession` cannot load a relationship :ref:`lazily
+<sqlalchemy:asyncio_orm_avoid_lazyloads>`, on first access. Both storages load the same way, so they
+send the same queries.
 
 Limits
 ------
