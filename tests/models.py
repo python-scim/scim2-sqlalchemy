@@ -1,4 +1,5 @@
 import datetime
+import itertools
 import uuid
 
 from scim2_models import EnterpriseUser
@@ -22,6 +23,13 @@ from scim2_sqlalchemy import ResourceMapping
 ENTERPRISE = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 
 
+_ids = itertools.count(1)
+
+
+def increasing_id() -> uuid.UUID:
+    return uuid.UUID(int=next(_ids))
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -37,7 +45,7 @@ membership = Table(
 class UserRecord(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=increasing_id)
     external_id: Mapped[str | None]
     user_name: Mapped[str] = mapped_column(unique=True)
     display_name: Mapped[str | None]

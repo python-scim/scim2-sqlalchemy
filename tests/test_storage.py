@@ -513,21 +513,6 @@ def test_a_deletion_the_database_refuses_raises(storage_factory, session, user_t
         storage_factory().delete(user_type, str(user_id))
 
 
-class InvalidIds:
-    """Generate identifiers that are not UUIDs."""
-
-    def generate_id(self, resource_type, resource):
-        return "user-1"
-
-
-def test_a_generated_identifier_must_fit_the_column(storage_factory, user_type):
-    """A UUID column cannot hold any string, so generate_id must return a UUID."""
-    storage = storage_factory(mixins=[InvalidIds])
-
-    with pytest.raises(ValueError, match="user-1"):
-        storage.create(user_type, User(user_name="bjensen"))
-
-
 @pytest.mark.parametrize(
     ("scim_filter", "found"),
     [

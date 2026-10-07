@@ -1,5 +1,4 @@
 import datetime
-import uuid
 from collections.abc import AsyncGenerator
 from collections.abc import Awaitable
 from collections.abc import Callable
@@ -39,7 +38,6 @@ from .conversion import _to_scim
 from .conversion import _version
 from .mapping import ResourceMapping
 from .mapping import _Collection
-from .query import _as_key
 from .query import _links_statement
 from .query import _load_statement
 from .query import _records_statement
@@ -88,13 +86,6 @@ class _StorageBase:
         }
         for mapping in self.mappings.values():
             mapping._bind(self.mappings)
-
-    def generate_id(self, resource_type: ResourceType, resource: Resource[Any]) -> str:
-        """Return the identifier of a new resource, when its column has no default.
-
-        Override this method to get predictable identifiers.
-        """
-        return uuid.uuid4().hex
 
     def _mapping(self, resource_type: ResourceType) -> ResourceMapping:
         return self.mappings[resource_type.name]  # type: ignore[index]
@@ -200,28 +191,13 @@ class _StorageBase:
             )
 
     def _new_record(self, resource_type: ResourceType, resource: Resource[Any]) -> Any:
-        """Build an empty record for a new resource, with its identifier and its dates.
+        """Build an empty record for a new resource, with its dates.
 
-        The identifier is generated only when the database does not fill it.
         The resource is written once the record is in the session, so that the
         records it links to do not pull a record the session does not know.
         """
         mapping = self._mapping(resource_type)
         record = mapping.record()
-        id_column = mapping._id.expression.property.columns[0]
-        if (
-            id_column.default is None
-            and id_column.server_default is None
-            and id_column is not id_column.table.autoincrement_column
-        ):
-            generated = self.generate_id(resource_type, resource)
-            key = _as_key(mapping._id, generated)
-            if key is None:
-                raise ValueError(
-                    f"The identifier {generated!r} does not fit the column "
-                    f"of '{mapping._id.key}'"
-                )
-            setattr(record, mapping._id.key, key)
         now = self.clock()
         setattr(record, mapping._created.key, now)
         setattr(record, mapping._last_modified.key, now)

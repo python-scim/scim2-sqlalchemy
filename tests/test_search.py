@@ -1,5 +1,3 @@
-import itertools
-
 import pytest
 from scim2_models import EnterpriseUser
 from scim2_models import SearchRequest
@@ -106,17 +104,6 @@ SORTS = [
 ]
 
 
-class OrderedIds:
-    """Give the resources increasing identifiers, so that ties sort in creation order, as in memory."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.ids = itertools.count()
-
-    def generate_id(self, resource_type, resource):
-        return f"{next(self.ids):032x}"
-
-
 @pytest.fixture
 def memory(user_type):
     storage = InMemoryStorage()
@@ -126,9 +113,11 @@ def memory(user_type):
 
 
 @pytest.fixture
-def sql(storage_factory, user_type):
-    """Return a storage holding the users of USERS, with ordered identifiers."""
-    storage = storage_factory(mixins=[OrderedIds])
+def sql(storage, user_type):
+    """Return a storage holding the users of USERS.
+
+    Their identifiers increase, so that ties sort in creation order, as in memory.
+    """
     for user in USERS:
         storage.create(user_type, UserModel.model_validate(user))
     return storage

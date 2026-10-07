@@ -12,7 +12,7 @@ The examples extend the intranet of the :doc:`../overview`.
 Prepare the SQLAlchemy model
 ----------------------------
 
-Give each SQLAlchemy model the columns the storage fills:
+Give each SQLAlchemy model the columns the storage needs:
 
 - a primary key, mapped to ``id``;
 - a creation date and a modification date, mapped to ``meta.created`` and
@@ -34,22 +34,9 @@ start again in each table, so they break this rule as soon as the server serves 
 types. Use a UUID, with the :class:`~sqlalchemy.types.Uuid` type, or a sequence that every
 table shares.
 
-The primary key may be an integer, a string or a UUID. The storage returns it as a string, and filters
-compare it as text. When the database fills the key, with an autoincrement or a default, the
-storage reads the key it gives. Otherwise, the storage generates one with
-:meth:`~scim2_sqlalchemy.SqlAlchemyStorage.generate_id`, a random hexadecimal string. Override
-this method for other identifiers:
-
-.. code-block:: python
-
-   import uuid
-
-   from scim2_sqlalchemy import SqlAlchemyStorage
-
-
-   class IntranetStorage(SqlAlchemyStorage):
-       def generate_id(self, resource_type, resource):
-           return f"{resource_type.name.lower()}-{uuid.uuid4()}"
+The primary key may be an integer, a string or a UUID, and the storage returns it as a string.
+The storage does not fill the key: give its column a default, such as ``default=uuid.uuid4``, a
+server default, or an autoincrement. The storage reads the key the database gives.
 
 Map a column
 ------------

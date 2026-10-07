@@ -19,7 +19,6 @@ from scim2_models import User
 from scim2_server.utils import load_default_service_provider_config
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
-from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
@@ -67,7 +66,7 @@ project_members = Table(
 class ProjectRecord(Base):
     __tablename__ = "projects"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     code: Mapped[str] = mapped_column(unique=True)
     title: Mapped[str | None]
     created_at: Mapped[datetime.datetime]
