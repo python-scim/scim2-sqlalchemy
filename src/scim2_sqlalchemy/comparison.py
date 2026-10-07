@@ -75,14 +75,15 @@ class _Normalizer(_Comparator):
     """Compare strings in PostgreSQL, normalized to NFC on both sides.
 
     The lower() of PostgreSQL follows the locale of the database, so the
-    comparison approaches the default comparison key without reaching it.
+    comparison approaches the default comparison key without reaching it. The
+    C collation orders the strings by code point, as scim2-models does.
     """
 
     def _form(self, column: _Column, expression: Any) -> ColumnElement[Any]:
         normalized = func.normalize(expression, literal_column("NFC"))
         if column.casefolded:
-            return func.normalize(func.lower(normalized), literal_column("NFC"))
-        return normalized
+            normalized = func.normalize(func.lower(normalized), literal_column("NFC"))
+        return normalized.collate("C")
 
     def column(self, column: _Column) -> ColumnElement[Any]:
         return self._form(column, column.compared)

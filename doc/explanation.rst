@@ -69,9 +69,10 @@ database allows:
   This approaches the default key without reaching it. ``lower()`` follows the locale of the
   database, and only lowers ASCII letters under the ``C`` locale. Even under a UTF-8 locale, a
   few letters differ, such as ``İ`` and the final sigma. ``normalize()`` needs PostgreSQL 13 and
-  a database encoded in UTF-8. An index that serves these filters is an index on the same
-  expression. With a key other than the default one, the storage warns that it only approaches
-  the key.
+  a database encoded in UTF-8. The comparison uses the ``C`` collation, which orders strings by
+  code point, as scim2-models does, whatever the collation of the column. An index that serves
+  these filters is an index on the same expression, with the same collation. With a key other
+  than the default one, the storage warns that it only approaches the key.
 - Other databases lower both sides with their own ``lower()``. MySQL and MariaDB are not
   supported: their default collations ignore the case and the accents, even for a ``caseExact``
   attribute.

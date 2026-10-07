@@ -12,6 +12,7 @@ from scim2_models import User
 from scim2_models import default_comparison_key
 from scim2_server.utils import load_default_service_provider_config
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.dialects import mysql
 
 from scim2_sqlalchemy.comparison import _comparator
@@ -228,3 +229,28 @@ def test_postgresql_approaches_the_default_key(session, database_url, value):
     assert session.scalar(select(expression)) == default_comparison_key(
         column.binding, value
     )
+
+
+@pytest.mark.parametrize(
+    ("parameters", "expected"),
+    [
+        ({"sort_by": "userName"}, ["e", "f", "é"]),
+        ({"filter": 'userName lt "f"'}, ["e"]),
+    ],
+)
+def test_postgresql_orders_strings_by_code_point(
+    sync_storage_factory, session, database_url, user_type, parameters, expected
+):
+    """The order of scim2-models holds whatever the collation of the column."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("SQLite orders strings by code point")
+    session.execute(
+        text(
+            'ALTER TABLE users ALTER COLUMN user_name TYPE varchar COLLATE "und-x-icu"'
+        )
+    )
+    storage = sync_storage_factory()
+    for name in ("é", "f", "e"):
+        storage.create(user_type, UserModel(user_name=name))
+
+    assert user_names(storage, user_type, **parameters) == expected
