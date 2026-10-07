@@ -9,10 +9,13 @@ from scim2_models import ScimProvider
 from scim2_models import SearchRequest
 from scim2_models import UniquenessException
 from scim2_models import User
+from scim2_models import default_comparison_key
 from scim2_server.utils import load_default_service_provider_config
+from sqlalchemy import select
 from sqlalchemy.dialects import mysql
 
 from scim2_sqlalchemy.comparison import _comparator
+from scim2_sqlalchemy.comparison import _Normalizer
 from scim2_sqlalchemy.query import _search_statements
 
 from .models import GROUPS
@@ -196,3 +199,32 @@ def test_another_database_lowers_both_sides(filter, expected):
     sql = count.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
 
     assert expected in str(sql)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "BJensen",
+        "ÉLISE",
+        "JOSE\u0301",
+        "Straße",
+        "ǅungla",
+        "ＢＪＥＮＳＥＮ",
+        "Ⅻ",
+        "Ω",
+    ],
+)
+def test_postgresql_approaches_the_default_key(session, database_url, value):
+    """PostgreSQL gives the form of the default key, except for a few letters such as İ and the final sigma."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("SQLite calls the comparison key itself")
+    column = next(
+        column
+        for column in USERS._string_columns()
+        if column.binding.urn.endswith(":userName")
+    )
+    expression = _Normalizer(ScimPolicy()).operand(column, value)
+
+    assert session.scalar(select(expression)) == default_comparison_key(
+        column.binding, value
+    )
