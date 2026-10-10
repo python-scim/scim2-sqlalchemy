@@ -198,6 +198,36 @@ without ``value``, raises a 400 error. The linked resources are never created or
 A storage serves the resource type of every :class:`~scim2_sqlalchemy.Link`. It raises a
 :class:`ValueError` otherwise.
 
+Link to several resource types
+------------------------------
+
+Map an attribute whose entries are resources of several types, such as the ``members`` of a
+group holding users and groups, to a list of :class:`~scim2_sqlalchemy.Link`, one per resource
+type:
+
+.. code-block:: python
+
+   {
+       "members": [
+           Link(Team.members, "User", type="User"),
+           Link(Team.subteams, "Group", type="Group"),
+       ],
+   }
+
+The storage reads the entries of each Link in the order of the list. For a single-valued
+attribute, it reads the first Link holding a record. It writes each entry in the Link holding
+the resource of its ``value``: per :rfc:`RFC 7643 §3.1 <7643#section-3.1>`, two resources never
+share an ``id``. The storage reads the direct members only, so a group may hold itself.
+
+Give each Link a ``type`` to fill the ``type`` sub-attribute of its entries. A client may send
+``type``: the storage compares it as filters compare strings, and refuses a type other than the
+one of the Link with a 400 error. Filters such as ``members[type eq "Group"]`` compare it too.
+Give a ``type`` to every Link of an attribute, or to none: without it, the storage does not
+store the ``type`` sub-attribute.
+
+A Link to one resource type takes a ``type`` too. ``Link(Account.teams, "Group",
+type="direct")`` gives the groups of a user the type ``direct``.
+
 Map a custom resource type
 --------------------------
 

@@ -10,7 +10,8 @@ Added
   records of a SQLAlchemy model, with :class:`~scim2_sqlalchemy.Attribute`,
   :class:`~scim2_sqlalchemy.Many` and :class:`~scim2_sqlalchemy.Link`. A
   :class:`~scim2_sqlalchemy.Link` links to one resource, such as a ``manager``, or to
-  several, such as ``members``.
+  several, such as ``members``. A list of Links links to several resource types, such as the
+  users and the groups of a group. A Link can give its entries a ``type``.
 - :class:`~scim2_sqlalchemy.SqlAlchemyStorage` and
   :class:`~scim2_sqlalchemy.AsyncSqlAlchemyStorage`, which serve the mappings to
   :doc:`scim2-server <scim2_server:index>`. They filter, sort and page the resources in the

@@ -33,6 +33,13 @@ membership = Table(
     Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
 )
 
+nesting = Table(
+    "nesting",
+    Base.metadata,
+    Column("parent_id", ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True),
+    Column("child_id", ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True),
+)
+
 
 class UserRecord(Base):
     __tablename__ = "users"
@@ -121,6 +128,11 @@ class GroupRecord(Base):
     members: Mapped[list[UserRecord]] = relationship(
         secondary=membership, back_populates="groups"
     )
+    subgroups: Mapped[list["GroupRecord"]] = relationship(
+        secondary=nesting,
+        primaryjoin=lambda: GroupRecord.id == nesting.c.parent_id,
+        secondaryjoin=lambda: GroupRecord.id == nesting.c.child_id,
+    )
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -157,7 +169,7 @@ def users_mapping(changes=None):
                 "primary": EmailRecord.primary,
             },
         ),
-        "groups": Link(UserRecord.groups, "Group"),
+        "groups": Link(UserRecord.groups, "Group", type="direct"),
         f"{ENTERPRISE}:employeeNumber": UserRecord.employee_number,
         f"{ENTERPRISE}:manager": Link(UserRecord.manager, "User"),
         "meta.created": UserRecord.created,
@@ -178,7 +190,10 @@ def groups_mapping(changes=None):
         "id": GroupRecord.id,
         "externalId": GroupRecord.external_id,
         "displayName": GroupRecord.display_name,
-        "members": Link(GroupRecord.members, "User"),
+        "members": [
+            Link(GroupRecord.members, "User", type="User"),
+            Link(GroupRecord.subgroups, "Group", type="Group"),
+        ],
         "meta.created": GroupRecord.created,
         "meta.lastModified": GroupRecord.last_modified,
     }
