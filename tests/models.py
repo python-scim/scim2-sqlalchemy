@@ -27,7 +27,8 @@ _ids = itertools.count(1)
 
 
 def increasing_id() -> uuid.UUID:
-    return uuid.UUID(int=next(_ids))
+    """Return a new identifier, greater than the previous ones, whose text holds letters."""
+    return uuid.UUID(int=(0xA << 124) | next(_ids))
 
 
 class Base(DeclarativeBase):
