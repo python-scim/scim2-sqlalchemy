@@ -19,9 +19,9 @@ from scim2_sqlalchemy import ResourceMapping
 
 
 class Color(enum.Enum):
-    Red = "Rouge"
-    blue = "bleu"
-    Green = "Vert"
+    Red = "Crimson"
+    blue = "azure"
+    Green = "Emerald"
 
 
 class Base(DeclarativeBase):
@@ -91,9 +91,9 @@ def storage(database_url, storage_factory, user_type):
     engine.dispose()
     storage = storage_factory(mappings={"User": COLORED_USERS})
     for user_name, title, external_id in [
-        ("a", "Red", "Rouge"),
-        ("b", "blue", "bleu"),
-        ("c", "Green", "Vert"),
+        ("a", "Red", "Crimson"),
+        ("b", "blue", "azure"),
+        ("c", "Green", "Emerald"),
         ("d", None, None),
     ]:
         emails = [{"value": f"{user_name}@example.org", "type": title}]
@@ -119,7 +119,7 @@ def test_an_enumerated_column_reads_back_the_string_it_stores(storage, user_type
     _, (user,) = storage.search([user_type], SearchRequest(filter='userName eq "a"'))
 
     assert user.title == "Red"
-    assert user.external_id == "Rouge"
+    assert user.external_id == "Crimson"
     assert user.emails[0].type == "Red"
 
 
@@ -128,13 +128,13 @@ def test_an_enumerated_column_reads_back_the_string_it_stores(storage, user_type
     [
         ('title eq "blue"', ["b"]),
         ('title eq "BLUE"', ["b"]),
-        ('title eq "bleu"', []),
+        ('title eq "azure"', []),
         ('title gt "h"', ["a"]),
         ('title co "e"', ["a", "b", "c"]),
         ("title pr", ["a", "b", "c"]),
-        ('externalId eq "bleu"', ["b"]),
-        ('externalId eq "Bleu"', []),
-        ('externalId gt "S"', ["b", "c"]),
+        ('externalId eq "azure"', ["b"]),
+        ('externalId eq "Azure"', []),
+        ('externalId gt "D"', ["b", "c"]),
         ('emails[type eq "green"]', ["c"]),
         ("emails.type pr", ["a", "b", "c"]),
     ],
@@ -168,7 +168,7 @@ def test_an_enumerated_column_sorts_on_the_string_it_stores(
     "user",
     [
         User(user_name="e", title="Purple"),
-        User(user_name="e", title="Rouge"),
+        User(user_name="e", title="Crimson"),
         User(user_name="e", external_id="Red"),
         User(user_name="e", emails=[{"value": "e@example.org", "type": "Purple"}]),
     ],
