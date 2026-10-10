@@ -17,6 +17,7 @@ from scim2_models import ResponseParameters
 from scim2_models import Schema
 from scim2_models import Uniqueness
 from sqlalchemy import ColumnElement
+from sqlalchemy import Enum as SqlEnum
 from sqlalchemy import String
 from sqlalchemy import cast
 from sqlalchemy import inspect
@@ -153,11 +154,30 @@ class _Column:
         return columns is None or bool(columns[0].nullable)
 
     @property
+    def enumeration(self) -> SqlEnum | None:
+        """The type of the column when it is an Enum, which stores strings."""
+        sql_type = self.expression.type
+        return sql_type if isinstance(sql_type, SqlEnum) else None
+
+    @property
     def compared(self) -> ColumnElement[Any]:
-        """The expression filters compare."""
-        if self.textual:
+        """The expression filters and sorts compare.
+
+        An Enum column is compared as text. PostgreSQL applies no string
+        function to its native enumerations, and sorts them in the order of
+        their declaration.
+        """
+        if self.textual or self.enumeration is not None:
             return cast(self.expression, String)
         return self.expression
+
+    @staticmethod
+    def stored_string(enumeration: SqlEnum, member: Enum) -> str:
+        """Return the string an Enum column stores for a member: its name, or its value with values_callable."""
+        strings: dict[Enum, str] = dict(
+            zip(type(member), enumeration.enums, strict=False)
+        )
+        return strings[member]
 
 
 @dataclass(eq=False)

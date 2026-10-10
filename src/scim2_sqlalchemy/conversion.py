@@ -6,6 +6,7 @@ from inspect import isclass
 from typing import Any
 
 from pydantic import BaseModel
+from scim2_models import AttributeBinding
 from scim2_models import InvalidValueException
 from scim2_models import Meta
 from scim2_models import Mutability
@@ -42,6 +43,8 @@ def _read(column: _Column, record: Any) -> Any:
     value = getattr(record, column.key)
     if value is None or not column.readable:
         return None
+    if isinstance(value, Enum) and column.enumeration is not None:
+        return column.stored_string(column.enumeration, value)
     return _as_scim(value)
 
 
@@ -233,6 +236,7 @@ def _check_storable(
         if stored is not None:
             current = _comparable(Path(binding.urn).get(stored, strict=False))
         if storage == _Storage.written:
+            _check_enumerated(mapping, binding, value)
             if (
                 value is None
                 and current is not None
@@ -254,6 +258,21 @@ def _check_storable(
         raise InvalidValueException(
             detail=f"'{binding.urn}' is not stored by this server"
         )
+
+
+def _check_enumerated(
+    mapping: ResourceMapping, binding: AttributeBinding, value: Any
+) -> None:
+    """Refuse a string that an Enum column does not store, rather than failing in the database."""
+    _, column = mapping._lookup(binding)
+    if column is None or column.enumeration is None:
+        return
+    stored = column.enumeration.enums
+    for item in value if isinstance(value, list) else [value]:
+        if item is not None and item not in stored:
+            raise InvalidValueException(
+                detail=f"'{binding.urn}' cannot hold {item!r} on this server"
+            )
 
 
 def _comparable(value: Any) -> Any:

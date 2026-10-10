@@ -183,7 +183,7 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
 
 def _present(column: _Column) -> ColumnElement[bool]:
     """Per RFC 7644 §3.4.2.2, an empty string is no value."""
-    expression = column.expression
+    expression = column.compared
     if column.is_string:
         return and_(expression.is_not(None), expression != "")
     return expression.is_not(None)

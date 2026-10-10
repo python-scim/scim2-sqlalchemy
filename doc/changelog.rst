@@ -20,5 +20,9 @@ Added
   attributes a mapping stores.
 - Filters, sorts and uniqueness checks compare strings with the comparison key of the policy of
   the provider: exactly on SQLite, and approximately on PostgreSQL.
+- A column of type :class:`~sqlalchemy.types.Enum` holds the string it stores: the name of the
+  member, or its value with ``values_callable``. Filters and sorts compare this string, also on
+  the native enumerations of PostgreSQL. A string outside the enumeration is refused with
+  ``invalidValue``.
 - A search or a read does not load the collections that ``attributes`` and ``excludedAttributes``
   remove from the response, such as the members of the groups.
