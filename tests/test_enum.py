@@ -110,13 +110,14 @@ def storage(database_url, storage_factory, user_type):
 
 
 def user_names(storage, user_type, **parameters):
-    _, resources = storage.search([user_type], SearchRequest(**parameters))
-    return [resource.user_name for resource in resources]
+    page = storage.search([user_type], SearchRequest(**parameters))
+    return [resource.user_name for resource in page.resources]
 
 
 def test_an_enumerated_column_reads_back_the_string_it_stores(storage, user_type):
     """A resource holds the string the column stores: the name of the member, or its value with values_callable."""
-    _, (user,) = storage.search([user_type], SearchRequest(filter='userName eq "a"'))
+    page = storage.search([user_type], SearchRequest(filter='userName eq "a"'))
+    (user,) = page.resources
 
     assert user.title == "Red"
     assert user.external_id == "Crimson"
@@ -162,6 +163,20 @@ def test_an_enumerated_column_sorts_on_the_string_it_stores(
         user_names(storage, user_type, sort_by=sort_by, sort_order=sort_order)
         == expected
     )
+
+
+@pytest.mark.parametrize("sort_by", ["title", "externalId"])
+def test_cursors_page_on_an_enumerated_column(storage, user_type, sort_by):
+    """The cursors resume on the string the column stores, in the order of the strings."""
+    expected = user_names(storage, user_type, sort_by=sort_by)
+    search_request = SearchRequest(cursor="", count=1, sort_by=sort_by)
+    pages = [storage.search([user_type], search_request)]
+    while pages[-1].next is not None:
+        pages.append(
+            storage.search([user_type], search_request, position=pages[-1].next)
+        )
+
+    assert [r.user_name for page in pages for r in page.resources] == expected
 
 
 @pytest.mark.parametrize(

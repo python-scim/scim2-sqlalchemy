@@ -3,6 +3,7 @@ from collections.abc import Callable
 from typing import Any
 
 from scim2_models import AttributeBinding
+from scim2_models import InvalidCursorException
 from scim2_models import InvalidFilterException
 from scim2_models import InvalidPathException
 from scim2_models import ResponseParameters
@@ -29,7 +30,6 @@ from sqlalchemy import inspect
 from sqlalchemy import literal
 from sqlalchemy import not_
 from sqlalchemy import null
-from sqlalchemy import nulls_first
 from sqlalchemy import nulls_last
 from sqlalchemy import or_
 from sqlalchemy import select
@@ -40,6 +40,9 @@ from sqlalchemy.orm import Mapper
 from .comparison import _SUBSTRINGS
 from .comparison import _Comparator
 from .conversion import _as_stored
+from .keyset import _Anchor
+from .keyset import _beyond
+from .keyset import _keyset_order
 from .mapping import ResourceMapping
 from .mapping import _Collection
 from .mapping import _Column
@@ -270,28 +273,6 @@ def _sort_key(
     return expression
 
 
-def _sorted(expression: Any, search_request: SearchRequest[Any]) -> Any:
-    """Per RFC 7644 §3.4.2.3, resources without a value come last when ascending and first when descending."""
-    if search_request.sort_order == SearchRequest.SortOrder.descending:
-        return nulls_first(expression.desc())
-    return nulls_last(expression.asc())
-
-
-def _order_by(
-    mapping: ResourceMapping,
-    search_request: SearchRequest[Any],
-    comparator: _Comparator,
-) -> list[Any]:
-    """Return the ORDER BY terms of a search, the record identifier last.
-
-    Without the identifier, records sharing a sort value could change pages
-    from a request to the next.
-    """
-    key = _sort_key(mapping, search_request, comparator)
-    terms = [] if key is None else [_sorted(key, search_request)]
-    return [*terms, mapping._id.expression]
-
-
 def _first_entry(collection: _Collection, expression: Any) -> Any:
     """Return the value of the primary entry of a collection, or else of its first one."""
     relationship = collection.relationship_property
@@ -321,39 +302,74 @@ def _where(
     return _FilterTranslator(mapping, scim_filter, comparator).visit(scim_filter.ast)
 
 
+def _cursor_page(page: Select[Any], search_request: SearchRequest[Any]) -> Select[Any]:
+    """Limit a cursor page to count + 1 rows, the last one telling whether a page follows."""
+    if search_request.count is None:
+        return page
+    return page.limit(search_request.count + 1)
+
+
+def _index_page(page: Select[Any], search_request: SearchRequest[Any]) -> Select[Any]:
+    page = page.offset(search_request.start_index_0 or 0)
+    if search_request.count is None:
+        return page
+    return page.limit(search_request.count)
+
+
 def _search_statements(
     mapping: ResourceMapping,
     search_request: SearchRequest[Any],
     comparator: _Comparator,
-) -> tuple[Select[tuple[int]], Select[Any]]:
-    """Return the statement counting the matching records, and the one selecting a page of them."""
+    anchor: _Anchor | None = None,
+) -> tuple[Select[tuple[int]], Select[tuple[Any, Any, str]]]:
+    """Return the statement counting the matching records, and the one selecting a page of them.
+
+    The page lists each record with its sort value and its identifier as
+    text. The records are ordered by sort value, then by identifier: without
+    the identifier, records sharing a sort value could change pages from a
+    request to the next. A cursor page is read from the anchor, in the reverse
+    order for a previous page.
+    """
     condition = _where(mapping, search_request, comparator)
     count = select(func.count()).select_from(mapping.record).where(condition)
+    key = _sort_key(mapping, search_request, comparator)
+    record_id = mapping._id.expression
+    descending = search_request.sort_order == SearchRequest.SortOrder.descending
+    forward = anchor is None or anchor.forward
     page = (
-        select(mapping.record)
+        select(
+            mapping.record,
+            (null() if key is None else key).label("key"),
+            cast(record_id, String).label("id"),
+        )
         .where(condition)
-        .order_by(*_order_by(mapping, search_request, comparator))
+        .order_by(*_keyset_order(key, [record_id], descending, forward))
         .options(
             *mapping._loader_options(mapping._returned_collections(search_request))
         )
-        .offset(search_request.start_index_0 or 0)
     )
-    if search_request.count is not None:
-        page = page.limit(search_request.count)
-    return count, page
+    if search_request.cursor is None:
+        return count, _index_page(page, search_request)
+    if anchor is not None:
+        value = _as_key(mapping._id, anchor.ties[0])
+        if value is None:
+            raise InvalidCursorException
+        page = page.where(_beyond(key, [record_id], anchor, [value], descending))
+    return count, _cursor_page(page, search_request)
 
 
 def _root_statements(
     mappings: list[ResourceMapping],
     search_request: SearchRequest[Any],
     comparator: _Comparator,
-) -> tuple[Select[tuple[int]], Select[tuple[int, str]]]:
+    anchor: _Anchor | None = None,
+) -> tuple[Select[tuple[int]], Select[tuple[int, str, Any]]]:
     """Return the statement counting the matching records of several mappings, and the one selecting a page of them.
 
-    The page lists the position of the mapping and the identifier of each
-    record, as text, so that the identifiers of every table fit in one column.
-    A mapping whose model does not declare the sort attribute sorts its
-    records as having no value.
+    The page lists the position of the mapping, the identifier of each
+    record as text, so that the identifiers of every table fit in one column,
+    and its sort value. A mapping whose model does not declare the sort
+    attribute sorts its records as having no value.
     """
     conditions = [_where(mapping, search_request, comparator) for mapping in mappings]
     keys = [_sort_key(mapping, search_request, comparator) for mapping in mappings]
@@ -382,15 +398,20 @@ def _root_statements(
             columns.append(key.label("key"))
         branches.append(select(*columns).where(condition))
     rows = union_all(*branches).subquery()
-    terms = [] if key_type is None else [_sorted(rows.c.key, search_request)]
-    page = (
-        select(rows.c.position, rows.c.id)
-        .order_by(*terms, rows.c.position, rows.c.id)
-        .offset(search_request.start_index_0 or 0)
-    )
-    if search_request.count is not None:
-        page = page.limit(search_request.count)
-    return count, page
+    row_key = None if key_type is None else rows.c.key
+    ties = [rows.c.position, rows.c.id]
+    descending = search_request.sort_order == SearchRequest.SortOrder.descending
+    forward = anchor is None or anchor.forward
+    page = select(
+        rows.c.position, rows.c.id, (null() if row_key is None else row_key)
+    ).order_by(*_keyset_order(row_key, ties, descending, forward))
+    if search_request.cursor is None:
+        return count, _index_page(page, search_request)
+    if anchor is not None:
+        if anchor.ties[0] not in range(len(mappings)):
+            raise InvalidCursorException
+        page = page.where(_beyond(row_key, ties, anchor, anchor.ties, descending))
+    return count, _cursor_page(page, search_request)
 
 
 def _records_statement(

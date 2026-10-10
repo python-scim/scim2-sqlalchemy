@@ -103,6 +103,31 @@ the identifier of each resource of the page. It then loads the records of each t
 type without the sort attribute sorts its resources as having no value. Between two resources of
 different types that share a sort value, the order of the resource types decides.
 
+Cursors give stable pages
+-------------------------
+
+The storage pages with ``startIndex``, and with the cursors of :rfc:`9865`. With a cursor, the
+position of a page holds the sort value and the identifier of a resource: the last one of the
+page for the next page, and the first one for the previous page. The next page selects the
+resources after them in the sort order. A resource created or deleted between two pages does not
+move the other ones. :doc:`scim2_server:explanation/pagination` explains what these stable pages
+guarantee, and :doc:`scim2_server:how-to/page-with-cursors` explains how to announce the
+cursors.
+
+The sort value of a position is the value the database compares, after the comparison key of the
+policy. The storage writes the condition on the sort value by hand, since a row comparison would
+not place ``NULL`` where the sort does. At the root, the position also holds the resource type,
+which orders the resources of different types that share a sort value.
+
+The storage reads one resource more than ``count``, to know whether a page follows. It only knows
+it in the direction it reads: forward for a next page, backward for a previous page. In the other
+direction, it assumes that the page the client comes from still exists. When all the resources of
+that page were deleted meanwhile, the client gets an empty page without cursors, and starts again
+from the first page.
+
+Each page shows the resources as they are when it is read. The storage does not give a snapshot
+of the collection as it was on the first page.
+
 Writes that cannot be stored are refused
 ----------------------------------------
 
@@ -172,9 +197,6 @@ send the same queries.
 
 Limits
 ------
-
-The storage pages with ``startIndex`` and ``count``. It does not support the cursors of
-:rfc:`9865`.
 
 A search or a read only loads the collections its response keeps, following the ``attributes``
 and ``excludedAttributes`` parameters. With ``excludedAttributes=members``, the members of the

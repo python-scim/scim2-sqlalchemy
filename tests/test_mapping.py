@@ -207,11 +207,11 @@ def test_the_schemas_hold_the_mapped_attributes_only():
 
 
 def test_an_attribute_the_mapping_only_reads_is_published_read_only():
-    """NickName comes from a hybrid property without setter."""
+    """Locale comes from a hybrid property without setter."""
     (user, _) = users_mapping().schemas()
 
-    (nick_name,) = [a for a in user.attributes if a.name == "nickName"]
-    assert nick_name.mutability == Mutability.read_only
+    (locale,) = [a for a in user.attributes if a.name == "locale"]
+    assert locale.mutability == Mutability.read_only
 
 
 def test_a_link_publishes_its_value_its_ref_and_a_read_only_display():

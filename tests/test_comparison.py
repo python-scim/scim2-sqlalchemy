@@ -48,8 +48,8 @@ def strict_provider() -> ScimProvider:
 
 
 def user_names(storage, resource_type, **parameters):
-    _, resources = storage.search([resource_type], SearchRequest(**parameters))
-    return [resource.user_name for resource in resources]
+    page = storage.search([resource_type], SearchRequest(**parameters))
+    return [resource.user_name for resource in page.resources]
 
 
 def test_a_decomposed_value_matches_its_composed_form(storage, user_type):

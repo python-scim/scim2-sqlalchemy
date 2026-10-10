@@ -33,7 +33,8 @@ UserModel = User[EnterpriseUser]
 
 
 def search(storage, resource_type, **parameters):
-    return storage.search([resource_type], SearchRequest(**parameters))
+    page = storage.search([resource_type], SearchRequest(**parameters))
+    return page.total, page.resources
 
 
 def test_emails_are_read_back_in_their_order(storage, user_type):
@@ -115,18 +116,18 @@ def test_a_value_whose_column_cannot_be_empty_cannot_be_removed(storage, user_ty
 
 
 def test_a_hybrid_property_without_setter_is_read_only(storage, user_type):
-    """NickName comes from userName, and is filtered on as any attribute."""
+    """Locale comes from userName, and is filtered on as any attribute."""
     user = storage.create(user_type, UserModel(user_name="BJensen"))
 
-    assert user.nick_name == "bjensen"
-    _, found = search(storage, user_type, filter='nickName eq "bjensen"')
+    assert user.locale == "bjensen"
+    _, found = search(storage, user_type, filter='locale eq "bjensen"')
     assert [r.user_name for r in found] == ["BJensen"]
 
 
 def test_a_read_only_attribute_cannot_be_changed(storage, user_type):
     """A value the mapping cannot write raises a 400, rather than being lost."""
     with pytest.raises(MutabilityException):
-        storage.create(user_type, UserModel(user_name="bjensen", nick_name="babs"))
+        storage.create(user_type, UserModel(user_name="bjensen", locale="babs"))
 
 
 def test_a_read_resource_can_be_written_back(storage, user_type, group_type):
