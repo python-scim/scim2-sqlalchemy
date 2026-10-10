@@ -20,7 +20,7 @@ what a search supports:
      - Columns, hybrid properties, and the entries of a :class:`~scim2_sqlalchemy.Many`, on the
        ``primary`` entry or else the first one.
    * - Pagination
-     - ``startIndex`` and ``count``. Cursors are not supported.
+     - ``startIndex`` and ``count``, or the cursors of :rfc:`9865`.
    * - Resource types
      - One, or every resource type for a search at the root of the server.
 
