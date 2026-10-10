@@ -46,9 +46,9 @@ def bob(storage, user_type, group_type):
 def search_bob(storage, user_type, statements, **parameters):
     """Return bob as a search returns him, and the statements the search ran."""
     statements.clear()
-    _, resources = storage.search(
+    resources = storage.search(
         [user_type], SearchRequest(filter='userName eq "bob"', **parameters)
-    )
+    ).resources
     return resources[0], [statement.lower() for statement in statements]
 
 
@@ -109,9 +109,9 @@ def test_an_excluded_extension_does_not_load_its_links(
 def test_excluded_members_are_not_loaded(bob, storage, group_type, statements):
     """Excluding the members of a group saves loading them and their users."""
     statements.clear()
-    _, groups = storage.search(
+    groups = storage.search(
         [group_type], SearchRequest(excluded_attributes=["members"])
-    )
+    ).resources
 
     assert groups[0].members is None
     assert not loads([statement.lower() for statement in statements], "users")
@@ -121,10 +121,10 @@ def test_a_filter_on_an_excluded_collection_still_applies(
     bob, storage, user_type, statements
 ):
     """The filter runs in SQL, whether the response keeps the collection or not."""
-    _, resources = storage.search(
+    resources = storage.search(
         [user_type],
         SearchRequest(filter='emails co "bob"', excluded_attributes=["emails"]),
-    )
+    ).resources
 
     assert [user.user_name for user in resources] == ["bob"]
 

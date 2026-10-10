@@ -26,7 +26,8 @@ def everyone(storage, user_type, group_type):
 
 
 def search(storage, resource_types, **parameters):
-    return storage.search(resource_types, SearchRequest(**parameters))
+    page = storage.search(resource_types, SearchRequest(**parameters))
+    return page.total, page.resources
 
 
 def names(resources):

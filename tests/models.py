@@ -1,5 +1,4 @@
 import datetime
-import itertools
 import uuid
 
 from scim2_models import EnterpriseUser
@@ -23,14 +22,6 @@ from scim2_sqlalchemy import ResourceMapping
 ENTERPRISE = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 
 
-_ids = itertools.count(1)
-
-
-def increasing_id() -> uuid.UUID:
-    """Return a new identifier, greater than the previous ones, whose text holds letters."""
-    return uuid.UUID(int=(0xA << 124) | next(_ids))
-
-
 class Base(DeclarativeBase):
     pass
 
@@ -46,11 +37,12 @@ membership = Table(
 class UserRecord(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=increasing_id)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     external_id: Mapped[str | None]
     user_name: Mapped[str] = mapped_column(unique=True)
     display_name: Mapped[str | None]
     title: Mapped[str | None]
+    nick_name: Mapped[str | None]
     user_type: Mapped[str | None] = mapped_column(default="Employee")
     given_name: Mapped[str | None]
     family_name: Mapped[str | None]
@@ -151,7 +143,8 @@ def users_mapping(changes=None):
         "displayName": UserRecord.display_name,
         "title": UserRecord.title,
         "userType": UserRecord.user_type,
-        "nickName": UserRecord.lower_name,
+        "nickName": UserRecord.nick_name,
+        "locale": UserRecord.lower_name,
         "name.givenName": UserRecord.given_name,
         "name.familyName": UserRecord.family_name,
         "active": UserRecord.active,

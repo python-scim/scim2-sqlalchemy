@@ -114,19 +114,16 @@ def memory(user_type):
 
 @pytest.fixture
 def sql(storage, user_type):
-    """Return a storage holding the users of USERS.
-
-    Their identifiers increase, so that ties sort in creation order, as in memory.
-    """
+    """Return a storage holding the users of USERS."""
     for user in USERS:
         storage.create(user_type, UserModel.model_validate(user))
     return storage
 
 
 def user_names(storage, user_type, **parameters):
-    total, resources = storage.search([user_type], SearchRequest(**parameters))
-    names = [resource.user_name for resource in resources]
-    assert total == len(names)
+    page = storage.search([user_type], SearchRequest(**parameters))
+    names = [resource.user_name for resource in page.resources]
+    assert page.total == len(names)
     return names
 
 
@@ -142,15 +139,16 @@ def test_a_filter_keeps_the_resources_kept_in_memory(
 
 @pytest.mark.parametrize("sort_order", ["ascending", "descending"])
 @pytest.mark.parametrize("sort_by", SORTS)
-def test_a_sort_orders_the_resources_as_in_memory(
-    memory, sql, user_type, sort_by, sort_order
+def test_a_sort_orders_the_resources_as_search_request_sort(
+    sql, user_type, sort_by, sort_order
 ):
-    """The database orders the resources as SearchRequest.sort does."""
-    parameters = {"sort_by": sort_by, "sort_order": sort_order}
+    """The database orders the resources as SearchRequest.sort does, ties by identifier."""
+    search_request = SearchRequest(sort_by=sort_by, sort_order=sort_order)
+    by_id = sql.search([user_type], SearchRequest()).resources
 
-    assert user_names(sql, user_type, **parameters) == user_names(
-        memory, user_type, **parameters
-    )
+    assert user_names(sql, user_type, sort_by=sort_by, sort_order=sort_order) == [
+        resource.user_name for resource in search_request.sort(by_id)
+    ]
 
 
 def test_a_page_is_cut_after_filtering_and_sorting(memory, sql, user_type):
@@ -161,7 +159,7 @@ def test_a_page_is_cut_after_filtering_and_sorting(memory, sql, user_type):
         "start_index": 2,
         "count": 2,
     }
-    total, resources = sql.search([user_type], SearchRequest(**parameters))
+    page = sql.search([user_type], SearchRequest(**parameters))
 
-    assert total == 4
-    assert [r.user_name for r in resources] == ["Bob", "carol"]
+    assert page.total == 4
+    assert [r.user_name for r in page.resources] == ["Bob", "carol"]
