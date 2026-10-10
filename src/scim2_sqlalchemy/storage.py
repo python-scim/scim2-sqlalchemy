@@ -34,7 +34,7 @@ from .comparison import _Comparator
 from .comparison import _comparator
 from .conversion import _check_storable
 from .conversion import _from_scim
-from .conversion import _link_ids
+from .conversion import _link_entries
 from .conversion import _to_scim
 from .conversion import _version
 from .keyset import _Anchor
@@ -42,6 +42,7 @@ from .keyset import _anchor
 from .keyset import _position
 from .mapping import ResourceMapping
 from .mapping import _Collection
+from .query import _as_key
 from .query import _links_statement
 from .query import _load_statement
 from .query import _records_statement
@@ -52,6 +53,28 @@ from .query import _taken_statement
 
 def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def _expire(
+    session: Session | AsyncSession, mapping: ResourceMapping, resource_id: str | None
+) -> None:
+    """Expire the record of an identifier when the session holds it, so that loading it reads the database again.
+
+    Only this record is read again: a record linking to itself, such as a
+    group holding itself, is then loaded once, with all its collections.
+    """
+    key = _as_key(mapping._id, resource_id)
+    if key is None:
+        return
+    record = session.identity_map.get(session.identity_key(mapping.record, key))
+    if record is not None:
+        session.expire(record)
+
+
+def _holds_id(collection: _Collection, record: Any, value: str) -> bool:
+    """Tell whether a record a Link links to has an identifier."""
+    target_id = collection.target._id  # type: ignore[union-attr]
+    return bool(getattr(record, target_id.key) == _as_key(target_id, value))
 
 
 def _by_position(rows: Sequence[Any]) -> dict[int, list[str]]:
@@ -265,14 +288,57 @@ class _StorageBase:
             if value is not None:
                 yield _taken_statement(mapping, column, value, resource.id, comparator)
 
-    @staticmethod
-    def _check_links(
-        collection: _Collection, ids: list[str], records: list[Any]
-    ) -> None:
-        if len(records) != len(set(ids)):
-            raise InvalidValueException(
-                detail=f"'{collection.binding.urn}' links to an unknown resource"
+    def _assign_links(
+        self, found: list[tuple[_Collection, list[Any]]], entries: list[Any]
+    ) -> dict[_Collection, list[Any]]:
+        """Give each entry of an attribute the record it links to, in the collection of the first Link holding that record.
+
+        found holds the records each Link of the attribute holds among the
+        values of the entries. An entry with a type links to a Link giving
+        the same type.
+        """
+        links: dict[_Collection, list[Any]] = {
+            collection: [] for collection, _ in found
+        }
+        urn = found[0][0].binding.urn
+        for entry in entries:
+            matches = [
+                (collection, record)
+                for collection, records in found
+                for record in records
+                if _holds_id(collection, record, entry.value)
+            ]
+            if not matches:
+                raise InvalidValueException(
+                    detail=f"'{urn}' links to an unknown resource"
+                )
+            entry_type = getattr(entry, "type", None)
+            if entry_type is not None:
+                matches = [
+                    (collection, record)
+                    for collection, record in matches
+                    if self._same_type(collection, entry_type)
+                ]
+                if not matches:
+                    raise InvalidValueException(
+                        detail=f"'{urn}' links to {entry.value!r}, which is not "
+                        f"of type {entry_type!r}"
+                    )
+            collection, record = matches[0]
+            if record not in links[collection]:
+                links[collection].append(record)
+        return links
+
+    def _same_type(self, collection: _Collection, value: str) -> bool:
+        """Tell whether a type is the one a Link gives, compared as filters compare it."""
+        binding = collection.type_column.binding  # type: ignore[union-attr]
+        try:
+            return bool(
+                binding.comparable(value, self._policy)
+                == binding.comparable(collection.link_type, self._policy)
             )
+        except ValueError:
+            return False
 
     def _new_record(self, resource_type: ResourceType, resource: Resource[Any]) -> Any:
         """Build an empty record for a new resource, with its dates.
@@ -451,6 +517,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         """Load a record, with the collections the response keeps."""
         mapping = self._mapping(resource_type)
         statement = _load_statement(mapping, resource_id, parameters)
+        _expire(self.session(), mapping, resource_id)
         record = None if statement is None else self.session().scalar(statement)
         if record is None:
             raise self._not_found(resource_type, resource_id)
@@ -475,12 +542,19 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> dict[_Collection, list[Any]]:
-        links = {}
-        for collection, ids in _link_ids(mapping, resource).items():
-            statement = _links_statement(collection, ids)
-            records = list(self.session().scalars(statement).all())
-            self._check_links(collection, ids, records)
-            links[collection] = records
+        links: dict[_Collection, list[Any]] = {}
+        for collections, entries in _link_entries(mapping, resource):
+            ids = [entry.value for entry in entries]
+            found = [
+                (
+                    collection,
+                    list(
+                        self.session().scalars(_links_statement(collection, ids)).all()
+                    ),
+                )
+                for collection in collections
+            ]
+            links |= self._assign_links(found, entries)
         return links
 
     def _flush(
@@ -647,6 +721,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         """Load a record, with the collections the response keeps."""
         mapping = self._mapping(resource_type)
         statement = _load_statement(mapping, resource_id, parameters)
+        _expire(self.session(), mapping, resource_id)
         record = None if statement is None else await self.session().scalar(statement)
         if record is None:
             raise self._not_found(resource_type, resource_id)
@@ -672,12 +747,15 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     async def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> dict[_Collection, list[Any]]:
-        links = {}
-        for collection, ids in _link_ids(mapping, resource).items():
-            statement = _links_statement(collection, ids)
-            records = list((await self.session().scalars(statement)).all())
-            self._check_links(collection, ids, records)
-            links[collection] = records
+        links: dict[_Collection, list[Any]] = {}
+        for collections, entries in _link_entries(mapping, resource):
+            ids = [entry.value for entry in entries]
+            found = []
+            for collection in collections:
+                statement = _links_statement(collection, ids)
+                records = (await self.session().scalars(statement)).all()
+                found.append((collection, list(records)))
+            links |= self._assign_links(found, entries)
         return links
 
     async def _flush(

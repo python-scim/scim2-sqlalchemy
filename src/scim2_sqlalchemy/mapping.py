@@ -21,6 +21,7 @@ from sqlalchemy import Enum as SqlEnum
 from sqlalchemy import String
 from sqlalchemy import cast
 from sqlalchemy import inspect
+from sqlalchemy import literal
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.orm import Mapper
@@ -34,13 +35,15 @@ class _Storage(Enum):
     A derived attribute is read from another resource, such as the display of
     a member, so writing it changes nothing. A ref is the $ref of a link,
     built from its value: clients may send it, and writing it changes nothing
-    either.
+    either. A link type is the type a Link gives its entries: clients may send
+    it, and the storage checks it against the linked resource.
     """
 
     written = "written"
     read_only = "read only"
     derived = "derived"
     ref = "ref"
+    link_type = "link type"
 
 
 def _holds_text(expression: Any) -> bool:
@@ -108,15 +111,27 @@ class Link:
     Writing the resource changes the links, and never creates nor deletes the
     linked resources.
 
+    A Link links to the resources of one resource type. An attribute linking
+    to several resource types, such as the ``members`` of a group holding users
+    and groups, maps to a list of Links, one per resource type. The entries are
+    read in the order of the list.
+
     :param relationship: The :func:`~sqlalchemy.orm.relationship` from the
         resource record to the records of the linked resources.
     :param resource_type: The name of the resource type of the linked
         resources, as the storage knows it.
+    :param type: The ``type`` sub-attribute of the entries, such as ``"User"``
+        for the members of a group, or ``"direct"`` for the groups of a user.
+        A client may send it, and a write with another value is refused.
+        Without it, the storage does not store ``type``.
     """
 
-    def __init__(self, relationship: Any, resource_type: str) -> None:
+    def __init__(
+        self, relationship: Any, resource_type: str, *, type: str | None = None
+    ) -> None:
         self.relationship = relationship
         self.resource_type = resource_type
+        self.type = type
 
 
 @dataclass(eq=False)
@@ -187,6 +202,9 @@ class _Collection:
     The entries of an owned collection belong to the resource. The others are
     links to the resources of another mapping, the target. A single collection
     holds one entry at most, such as the manager of a user.
+
+    link_type is the type a Link gives its entries, and type_column the
+    constant filters compare it as.
     """
 
     binding: AttributeBinding
@@ -194,6 +212,8 @@ class _Collection:
     columns: dict[str, _Column] = field(default_factory=dict)
     resource_type: str | None = None
     target: "ResourceMapping | None" = None
+    link_type: str | None = None
+    type_column: _Column | None = None
 
     @property
     def owned(self) -> bool:
@@ -210,6 +230,14 @@ class _Collection:
     @property
     def single(self) -> bool:
         return not self.binding.is_multivalued
+
+    def column(self, sub_field_name: str | None) -> _Column | None:
+        """Return the column of a sub-attribute, or None for the collection named alone."""
+        if sub_field_name is None:
+            return None
+        if sub_field_name == "type" and self.type_column is not None:
+            return self.type_column
+        return self.columns.get(sub_field_name)
 
     def exists(self, condition: Any = None) -> ColumnElement[bool]:
         """Return the condition that an entry exists, and matches condition when given."""
@@ -235,8 +263,8 @@ class ResourceMapping:
         ``User[EnterpriseUser]``.
     :param record: The SQLAlchemy model of the records.
     :param attributes: The attributes, by SCIM path. A value is a column, a
-        :class:`~sqlalchemy.ext.hybrid.hybrid_property`, an :class:`Attribute`, a :class:`Many` or a
-        :class:`Link`. ``id``, ``meta.created`` and ``meta.lastModified``
+        :class:`~sqlalchemy.ext.hybrid.hybrid_property`, an :class:`Attribute`, a :class:`Many`, a
+        :class:`Link`, or a list of :class:`Link`. ``id``, ``meta.created`` and ``meta.lastModified``
         are required.
     :param version: The ``version_id_col`` of the mapper of ``record``, which
         gives ``meta.version`` (:ref:`sqlalchemy:mapper_version_counter`).
@@ -257,7 +285,7 @@ class ResourceMapping:
         self.model = model
         self.record = record
         self._columns: dict[tuple[type[BaseModel], str, str | None], _Column] = {}
-        self._collections: dict[tuple[type[BaseModel], str], _Collection] = {}
+        self._collections: dict[tuple[type[BaseModel], str], list[_Collection]] = {}
 
         for required in self._REQUIRED:
             if required not in attributes:
@@ -334,11 +362,11 @@ class ResourceMapping:
         storage = self._storage(urn)
         if storage is None:
             return None
-        if storage == _Storage.written:
+        if storage in (_Storage.written, _Storage.link_type):
             return attribute
         if storage == _Storage.ref:
-            linked = self._linked_resource_type(urn)
-            return attribute.model_copy(update={"reference_types": [linked]})
+            linked = self._linked_resource_types(urn)
+            return attribute.model_copy(update={"reference_types": linked})
         return attribute.model_copy(update={"mutability": Mutability.read_only})
 
     def _storage(self, urn: str) -> _Storage | None:
@@ -347,7 +375,7 @@ class ResourceMapping:
         for column in self._columns.values():
             if column.binding.urn.lower() == key:
                 return _Storage.written if column.writable else _Storage.read_only
-        for collection in self._collections.values():
+        for collection in self._all_collections():
             if not collection.owned:
                 head = collection.binding.urn.lower()
                 if key == f"{head}.value":
@@ -356,6 +384,8 @@ class ResourceMapping:
                     return _Storage.derived
                 if key == f"{head}.$ref":
                     return _Storage.ref
+                if key == f"{head}.type" and collection.link_type is not None:
+                    return _Storage.link_type
                 continue
             for column in collection.columns.values():
                 if column.binding.urn.lower() == key:
@@ -371,14 +401,20 @@ class ResourceMapping:
             if column.binding.urn.lower() == key
         )
 
-    def _linked_resource_type(self, urn: str) -> str | None:
-        """Return the resource type a Link links to, from the URN of its $ref."""
+    def _linked_resource_types(self, urn: str) -> list[str]:
+        """Return the resource types the Links of an attribute link to, from the URN of its $ref."""
         head = urn.lower().removesuffix(".$ref")
-        return next(
+        return [
             collection.resource_type
-            for collection in self._collections.values()
+            for collection in self._all_collections()
             if collection.binding.urn.lower() == head
-        )
+            and collection.resource_type is not None
+        ]
+
+    def _all_collections(self) -> Iterator[_Collection]:
+        """Yield the collections of every attribute, each Link of an attribute being a collection."""
+        for collections in self._collections.values():
+            yield from collections
 
     def _column(self, path: str) -> _Column:
         binding = self._resolve(path)
@@ -388,19 +424,22 @@ class ResourceMapping:
 
     def _lookup(
         self, binding: AttributeBinding
-    ) -> tuple[_Collection | None, _Column | None]:
-        """Return the collection holding an attribute, if any, and the column of the attribute.
+    ) -> list[tuple[_Collection | None, _Column | None]]:
+        """Return each collection holding an attribute, if any, with the column of the attribute in it.
 
-        The column is None for an attribute stored nowhere, and for a
-        collection named alone, such as emails.
+        An attribute outside collections gives one pair, without collection.
+        An attribute linking to several resource types gives a pair for each
+        of its Links. The column is None for an attribute stored nowhere, and
+        for a collection named alone, such as emails.
         """
-        collection = self._collections.get((binding.model, binding.field_name))
-        if collection is not None:
-            if binding.sub_field_name is None:
-                return collection, None
-            return collection, collection.columns.get(binding.sub_field_name)
-        key = (binding.model, binding.field_name, binding.sub_field_name)
-        return None, self._columns.get(key)
+        collections = self._collections.get((binding.model, binding.field_name))
+        if collections is None:
+            key = (binding.model, binding.field_name, binding.sub_field_name)
+            return [(None, self._columns.get(key))]
+        return [
+            (collection, collection.column(binding.sub_field_name))
+            for collection in collections
+        ]
 
     def _sub_columns(self, binding: AttributeBinding) -> list[_Column]:
         """Return the mapped sub-attributes of a complex attribute holding a single value."""
@@ -417,10 +456,12 @@ class ResourceMapping:
         for column in self._columns.values():
             if column.is_string:
                 yield column
-        for collection in self._collections.values():
+        for collection in self._all_collections():
             for column in collection.columns.values():
                 if column.is_string:
                     yield column
+            if collection.type_column is not None:
+                yield collection.type_column
 
     def _unique_columns(self) -> Iterator[_Column]:
         """Yield the readable columns whose values no two resources share."""
@@ -435,7 +476,7 @@ class ResourceMapping:
         self, parameters: ResponseParameters[Any] | None = None
     ) -> list[_Collection]:
         """Return the collections a response keeps, all of them without parameters."""
-        collections = list(self._collections.values())
+        collections = list(self._all_collections())
         if parameters is None:
             return collections
         paths = Path[self.model].iter_paths(  # type: ignore[name-defined]
@@ -467,7 +508,7 @@ class ResourceMapping:
         Several storages may share a mapping, as long as they link it to the
         same mappings.
         """
-        for collection in self._collections.values():
+        for collection in self._all_collections():
             if collection.owned:
                 continue
             target = mappings.get(collection.resource_type)  # type: ignore[arg-type]
@@ -508,7 +549,7 @@ class ResourceMapping:
             binding = self._find(path)
             if binding is None:
                 continue
-            _, column = self._lookup(binding)
+            ((_, column),) = self._lookup(binding)
             if column is not None and column.readable:
                 return column
         return None
@@ -527,7 +568,11 @@ class ResourceMapping:
         target = binding.target_type
         is_complex = isclass(target) and issubclass(target, BaseModel)
 
-        if isinstance(value, Many | Link):
+        if isinstance(value, Link):
+            value = [value]
+        if isinstance(value, Many) or (
+            isinstance(value, list) and all(isinstance(item, Link) for item in value)
+        ):
             if not (is_complex and binding.sub_field_name is None) or (
                 isinstance(value, Many) and not binding.is_multivalued
             ):
@@ -537,27 +582,11 @@ class ResourceMapping:
                 raise ValueError(
                     f"{path!r} is not {kind} attribute of {self.model.__name__}"
                 )
-            collection = _Collection(binding, value.relationship)
-            if collection.relationship_property.uselist == collection.single:
-                raise ValueError(
-                    f"{path!r} holds {'one entry' if collection.single else 'several entries'}, "
-                    f"but its relationship holds {'several' if collection.single else 'one'}"
-                )
             if isinstance(value, Many):
-                if not collection.relationship_property.cascade.delete_orphan:
-                    raise ValueError(
-                        f"The relationship of {path!r} needs the delete-orphan cascade"
-                    )
-                for sub_path, expression in value.attributes.items():
-                    sub_binding = self._resolve(f"{path}.{sub_path}")
-                    collection.columns[sub_binding.sub_field_name] = (  # type: ignore[index]
-                        self._build_column(
-                            f"{path}.{sub_path}", sub_binding, expression
-                        )
-                    )
+                collections = [self._many(path, binding, value)]
             else:
-                collection.resource_type = value.resource_type
-            self._collections[(binding.model, binding.field_name)] = collection
+                collections = self._links(path, binding, value)
+            self._collections[(binding.model, binding.field_name)] = collections
             return
 
         if binding.is_multivalued or is_complex:
@@ -568,6 +597,68 @@ class ResourceMapping:
         self._columns[(binding.model, binding.field_name, binding.sub_field_name)] = (
             self._build_column(path, binding, value)
         )
+
+    def _collection(
+        self, path: str, binding: AttributeBinding, relationship: Any
+    ) -> _Collection:
+        """Build the collection of a relationship, holding as many records as the attribute holds entries."""
+        collection = _Collection(binding, relationship)
+        if collection.relationship_property.uselist == collection.single:
+            raise ValueError(
+                f"{path!r} holds {'one entry' if collection.single else 'several entries'}, "
+                f"but its relationship holds {'several' if collection.single else 'one'}"
+            )
+        return collection
+
+    def _many(self, path: str, binding: AttributeBinding, many: Many) -> _Collection:
+        """Build the collection of a Many, with the columns of its entries."""
+        collection = self._collection(path, binding, many.relationship)
+        if not collection.relationship_property.cascade.delete_orphan:
+            raise ValueError(
+                f"The relationship of {path!r} needs the delete-orphan cascade"
+            )
+        for sub_path, expression in many.attributes.items():
+            sub_binding = self._resolve(f"{path}.{sub_path}")
+            collection.columns[sub_binding.sub_field_name] = self._build_column(  # type: ignore[index]
+                f"{path}.{sub_path}", sub_binding, expression
+            )
+        return collection
+
+    def _links(
+        self, path: str, binding: AttributeBinding, links: list[Link]
+    ) -> list[_Collection]:
+        """Build the collections of the Links of an attribute, one per resource type.
+
+        The type of the entries is compared, in filters, as a constant of each
+        Link.
+        """
+        resource_types = [link.resource_type for link in links]
+        if not links or len(set(resource_types)) != len(resource_types):
+            raise ValueError(
+                f"{path!r} needs one Link per resource type, and at least one"
+            )
+        typed = {link.type is not None for link in links}
+        if len(typed) > 1:
+            raise ValueError(f"Either every Link of {path!r} has a type, or none")
+        type_binding = self._find(f"{path}.type")
+        if typed == {True} and type_binding is None:
+            raise ValueError(f"{path!r} has no type sub-attribute")
+
+        collections = []
+        for link in links:
+            collection = self._collection(path, binding, link.relationship)
+            collection.resource_type = link.resource_type
+            if link.type is not None:
+                collection.link_type = link.type
+                collection.type_column = _Column(
+                    type_binding,  # type: ignore[arg-type]
+                    literal(link.type),
+                    "type",
+                    True,
+                    False,
+                )
+            collections.append(collection)
+        return collections
 
     def _build_column(
         self, path: str, binding: AttributeBinding, value: Any
