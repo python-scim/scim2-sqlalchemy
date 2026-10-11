@@ -81,6 +81,7 @@ def _exact_key(column: _Column, value: str) -> Any:
 
 
 def _unmapped(binding: AttributeBinding) -> InvalidFilterException:
+    """Return the error of a filter on an attribute the mapping does not let filters read."""
     return InvalidFilterException(detail=f"Cannot filter on '{binding.urn}'")
 
 
@@ -156,11 +157,16 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
     def _in_collection(
         self, collection: _Collection | None, condition: ColumnElement[bool]
     ) -> ColumnElement[bool]:
+        """Apply a condition to the entries of a collection, or to the record itself outside of any collection.
+
+        Within a value selection, the condition already applies to the entries.
+        """
         if collection is None or self.scope is not None:
             return condition
         return collection.exists(condition)
 
     def visit_comparison(self, node: Comparison) -> ColumnElement[bool]:
+        """Keep the records with a value matching the comparison, in any collection holding the attribute."""
         binding = self._resolve(node.attr_path, self.filter.resolve_comparison)
         if binding is None:
             return false()
@@ -194,6 +200,10 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         )
 
     def visit_present(self, node: Present) -> ColumnElement[bool]:
+        """Keep the records with a value for the attribute.
+
+        A complex attribute is present when one of its sub-attributes is.
+        """
         binding = self._resolve(node.attr_path, self.filter.resolve)
         if binding is None:
             return false()
@@ -217,13 +227,16 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         return or_(*(_present(column) for column in sub_columns))
 
     def visit_not(self, node: Not) -> ColumnElement[bool]:
+        """Keep the records the inner filter does not keep."""
         return not_(self.visit(node.expr))
 
     def visit_logical_expr(self, node: LogicalExpr) -> ColumnElement[bool]:
+        """Combine the conditions of the terms with AND or OR."""
         combine = and_ if node.op == LogicalOperator.and_ else or_
         return combine(*(self.visit(term) for term in node.terms))
 
     def visit_value_path(self, node: ValuePath) -> ColumnElement[bool]:
+        """Keep the records with an entry of the attribute matching the inner filter."""
         binding = self.filter.resolve(node.attr_path, strict=False)
         if binding is None:
             return false()
@@ -361,6 +374,7 @@ def _where(
     search_request: SearchRequest[Any],
     comparator: _Comparator,
 ) -> ColumnElement[bool]:
+    """Return the condition keeping the records matching the filter of a search, or every record without filter."""
     if search_request.filter is None:
         return true()
     scim_filter = ScimFilter[mapping.model](str(search_request.filter))  # type: ignore[name-defined]
@@ -375,6 +389,7 @@ def _cursor_page(page: Select[Any], search_request: SearchRequest[Any]) -> Selec
 
 
 def _index_page(page: Select[Any], search_request: SearchRequest[Any]) -> Select[Any]:
+    """Limit a page to the records from startIndex, at most count of them."""
     page = page.offset(search_request.start_index_0 or 0)
     if search_request.count is None:
         return page

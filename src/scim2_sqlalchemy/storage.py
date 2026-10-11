@@ -52,6 +52,7 @@ from .query import _taken_statement
 
 
 def _utcnow() -> datetime.datetime:
+    """Return the current time, in UTC."""
     return datetime.datetime.now(datetime.UTC)
 
 
@@ -129,11 +130,11 @@ def _cursor_page(
 
 
 def _nothing() -> None:
-    pass
+    """Check nothing, as the default uniqueness check of a flush."""
 
 
 async def _nothing_async() -> None:
-    pass
+    """Check nothing, as the default uniqueness check of a flush."""
 
 
 class _StorageBase:
@@ -156,6 +157,7 @@ class _StorageBase:
             mapping._bind(self.mappings)
 
     def _mapping(self, resource_type: ResourceType) -> ResourceMapping:
+        """Return the mapping of a resource type."""
         return self.mappings[resource_type.name]  # type: ignore[index]
 
     def _root_page(
@@ -253,6 +255,7 @@ class _StorageBase:
     def _not_found(
         resource_type: ResourceType, resource_id: str | None
     ) -> NotFoundException:
+        """Return the error of a resource that does not exist."""
         return NotFoundException(
             detail=f"{resource_type.name} {resource_id!r} not found"
         )
@@ -261,6 +264,7 @@ class _StorageBase:
     def _check_version(
         mapping: ResourceMapping, record: Any, expected_version: str | None
     ) -> None:
+        """Refuse to change a record whose version is not the expected one."""
         if (
             expected_version is not None
             and _version(mapping, record) != expected_version
@@ -421,6 +425,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         *,
         response_parameters: ResponseParameters[Any] | None = None,
     ) -> Resource[Any]:
+        """Return a resource, with the attributes the response keeps."""
         record = self._load(resource_type, resource_id, response_parameters)
         return self._to_scim(resource_type, record, response_parameters)
 
@@ -431,6 +436,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         *,
         position: Any = None,
     ) -> SearchPage:
+        """Return a page of the resources matching a search, on one resource type or at the root."""
         if not resource_types:
             return SearchPage(0, [])
         session = self.session()
@@ -464,6 +470,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     def create(
         self, resource_type: ResourceType, resource: Resource[Any]
     ) -> Resource[Any]:
+        """Store a new resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         self._check_storable(resource_type, resource, None)
         self._check_uniqueness(mapping, resource)
@@ -484,6 +491,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         *,
         expected_version: str | None = None,
     ) -> Resource[Any]:
+        """Replace a resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         record = self._load(resource_type, resource.id)
         self._check_version(mapping, record, expected_version)
@@ -503,6 +511,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         *,
         expected_version: str | None = None,
     ) -> None:
+        """Delete a resource."""
         mapping = self._mapping(resource_type)
         record = self._load(resource_type, resource_id)
         self._check_version(mapping, record, expected_version)
@@ -526,6 +535,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     def _check_uniqueness(
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> None:
+        """Refuse a resource with a unique value another resource already has."""
         session = self.session()
         comparator = self._ready_comparator(session)
         for statement in self._unique_statements(mapping, resource, comparator):
@@ -542,6 +552,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> dict[_Collection, list[Any]]:
+        """Return the records each Link of a resource links to, refusing a value that links to nothing."""
         links: dict[_Collection, list[Any]] = {}
         for collections, entries in _link_entries(mapping, resource):
             ids = [entry.value for entry in entries]
@@ -620,6 +631,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         *,
         response_parameters: ResponseParameters[Any] | None = None,
     ) -> Resource[Any]:
+        """Return a resource, with the attributes the response keeps."""
         record = await self._load(resource_type, resource_id, response_parameters)
         return self._to_scim(resource_type, record, response_parameters)
 
@@ -630,6 +642,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         *,
         position: Any = None,
     ) -> SearchPage:
+        """Return a page of the resources matching a search, on one resource type or at the root."""
         if not resource_types:
             return SearchPage(0, [])
         session = self.session()
@@ -663,6 +676,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     async def create(
         self, resource_type: ResourceType, resource: Resource[Any]
     ) -> Resource[Any]:
+        """Store a new resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         self._check_storable(resource_type, resource, None)
         await self._check_uniqueness(mapping, resource)
@@ -683,6 +697,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         *,
         expected_version: str | None = None,
     ) -> Resource[Any]:
+        """Replace a resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         record = await self._load(resource_type, resource.id)
         self._check_version(mapping, record, expected_version)
@@ -703,6 +718,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         *,
         expected_version: str | None = None,
     ) -> None:
+        """Delete a resource."""
         mapping = self._mapping(resource_type)
         record = await self._load(resource_type, resource_id)
         self._check_version(mapping, record, expected_version)
@@ -730,6 +746,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     async def _check_uniqueness(
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> None:
+        """Refuse a resource with a unique value another resource already has."""
         session = self.session()
         comparator = await self._ready_comparator(session)
         for statement in self._unique_statements(mapping, resource, comparator):
@@ -747,6 +764,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     async def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
     ) -> dict[_Collection, list[Any]]:
+        """Return the records each Link of a resource links to, refusing a value that links to nothing."""
         links: dict[_Collection, list[Any]] = {}
         for collections, entries in _link_entries(mapping, resource):
             ids = [entry.value for entry in entries]

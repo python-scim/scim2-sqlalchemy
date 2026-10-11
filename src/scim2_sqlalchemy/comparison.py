@@ -81,6 +81,7 @@ class _Normalizer(_Comparator):
     """
 
     def _form(self, column: _Column, expression: Any) -> ColumnElement[Any]:
+        """Normalize a string expression to NFC, lowered if the column ignores the case, under the C collation."""
         normalized = func.normalize(expression, literal_column("NFC"), type_=String)
         if column.casefolded:
             normalized = func.normalize(
@@ -89,9 +90,11 @@ class _Normalizer(_Comparator):
         return normalized.collate("C")
 
     def column(self, column: _Column) -> ColumnElement[Any]:
+        """Return a string column normalized to NFC."""
         return self._form(column, column.compared)
 
     def operand(self, column: _Column, value: str) -> Any:
+        """Return a string normalized to NFC, in Python then in the database."""
         return self._form(column, literal(unicodedata.normalize("NFC", value)))
 
 
@@ -112,12 +115,15 @@ class _KeyFunction(_Comparator):
         }
 
     def prepare(self, connection: Any) -> None:
+        """Register the comparison key as a SQL function of a DBAPI connection."""
         connection.create_function(_KEY_FUNCTION, 2, self.key, deterministic=True)
 
     async def prepare_async(self, connection: Any) -> None:
+        """Register the comparison key as a SQL function of an asyncio DBAPI connection."""
         await connection.create_function(_KEY_FUNCTION, 2, self.key, deterministic=True)
 
     def key(self, urn: str, value: Any) -> Any:
+        """Return the comparison key of a stored value, or None if the key refuses it."""
         if value is None:
             return None
         try:
@@ -126,17 +132,20 @@ class _KeyFunction(_Comparator):
             return None
 
     def column(self, column: _Column) -> ColumnElement[Any]:
+        """Return the comparison key of a string column, computed by the SQL function."""
         key: ColumnElement[Any] = getattr(func, _KEY_FUNCTION)(
             literal(column.binding.urn), column.compared, type_=String
         )
         return key
 
     def operand(self, column: _Column, value: str) -> Any:
+        """Return the comparison key of a string, computed in Python."""
         return column.binding.comparable(value, self.policy)
 
     def substring(
         self, op: CompareOperator, column: _Column, value: str
     ) -> ColumnElement[bool]:
+        """Return whether a string column contains, starts or ends with a value, compared by their keys."""
         left = self.column(column)
         right = literal(self.operand(column, value))
         if op == CompareOperator.co:

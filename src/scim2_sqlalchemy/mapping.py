@@ -50,6 +50,7 @@ class _Storage(Enum):
 
 
 def _holds_text(expression: Any) -> bool:
+    """Whether an expression holds strings. A type that tells no Python type is taken as text."""
     try:
         return expression.type.python_type is str
     except NotImplementedError:
@@ -183,6 +184,7 @@ class _Column:
 
     @property
     def is_string(self) -> bool:
+        """Whether the attribute is a SCIM string."""
         target = self.binding.target_type
         return (
             target is not None
@@ -251,22 +253,27 @@ class _Collection:
 
     @property
     def owned(self) -> bool:
+        """Whether the entries belong to the resource, rather than link to other resources."""
         return self.resource_type is None
 
     @property
     def entry_class(self) -> type[Any]:
+        """The SQLAlchemy model of the entries."""
         return self.relationship_property.mapper.class_
 
     @property
     def relationship_property(self) -> RelationshipProperty[Any]:
+        """The relationship holding the entries."""
         return self.relationship.property  # type: ignore[return-value]
 
     @property
     def single(self) -> bool:
+        """Whether the collection holds one entry at most."""
         return not self.binding.is_multivalued
 
     @property
     def simple(self) -> bool:
+        """Whether the collection holds the values of a multi-valued simple attribute."""
         return None in self.columns
 
     def column(self, sub_field_name: str | None) -> _Column | None:
@@ -363,6 +370,7 @@ class ResourceMapping:
         return [self._restrict(model.to_schema()) for model in models]
 
     def _restrict(self, schema: Schema) -> Schema:
+        """Return a schema with the attributes the mapping stores only."""
         attributes = []
         for attribute in schema.attributes or []:
             restricted = self._restrict_attribute(
@@ -458,6 +466,7 @@ class ResourceMapping:
             yield from collections
 
     def _column(self, path: str) -> _Column:
+        """Return the column of the attribute at a path."""
         binding = self._resolve(path)
         return self._columns[
             (binding.model, binding.field_name, binding.sub_field_name)
@@ -596,15 +605,18 @@ class ResourceMapping:
         return None
 
     def _find(self, path: str) -> AttributeBinding | None:
+        """Return the attribute at a path, or None if the model has none there."""
         return Path[self.model](path).resolve()  # type: ignore[name-defined]
 
     def _resolve(self, path: str) -> AttributeBinding:
+        """Return the attribute at a path, refusing a path the model does not know."""
         binding = self._find(path)
         if binding is None:
             raise ValueError(f"{path!r} is not an attribute of {self.model.__name__}")
         return binding
 
     def _add(self, path: str, value: Any) -> None:
+        """Check the mapping of the attribute at a path, and keep its column or its collections."""
         binding = self._resolve(path)
         target = binding.target_type
         is_complex = isclass(target) and issubclass(target, BaseModel)

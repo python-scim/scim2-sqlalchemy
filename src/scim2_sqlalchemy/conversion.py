@@ -44,6 +44,7 @@ def _as_stored(value: Any) -> Any:
 
 
 def _read(column: _Column, record: Any) -> Any:
+    """Return the SCIM value of a column of a record, or None if the column is not read."""
     value = getattr(record, column.key)
     if value is None or not column.readable:
         return None
@@ -53,6 +54,7 @@ def _read(column: _Column, record: Any) -> Any:
 
 
 def _version(mapping: ResourceMapping, record: Any) -> str:
+    """Return the weak ETag of the version of a record."""
     return f'W/"{getattr(record, mapping._version.key)}"'
 
 
@@ -180,6 +182,7 @@ def _from_scim(
 
 
 def _write_entry(collection: _Collection, entry: Any) -> Any:
+    """Build the record storing an entry of a multi-valued attribute."""
     record = collection.entry_class()
     if collection.simple:
         setattr(record, collection.columns[None].key, _as_stored(entry))
