@@ -141,6 +141,10 @@ The mapping makes the password write-only:
 
    {"password": Attribute(Account.password, readable=False)}
 
+A column of type :class:`~scim2_sqlalchemy.Hashed` hashes the values the same way, without a
+property: ``mapped_column(Hashed(hash_password))``. The mapping refuses it unless
+``readable=False``.
+
 A write-only attribute keeps its stored value when a request does not carry it, since a
 resource never carries it back.
 

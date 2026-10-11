@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ from scim2_models import ResponseParameters
 from scim2_models import Schema
 from scim2_models import Uniqueness
 from sqlalchemy import ColumnElement
+from sqlalchemy import Dialect
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy import String
 from sqlalchemy import cast
@@ -27,6 +29,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.orm import Mapper
 from sqlalchemy.orm import RelationshipProperty
 from sqlalchemy.orm import strategy_options
+from sqlalchemy.types import TypeDecorator
 
 
 class _Storage(Enum):
@@ -75,6 +78,30 @@ class Attribute:
         self.expression = expression
         self.readable = readable
         self.writable = writable
+
+
+class Hashed(TypeDecorator[str]):
+    """A column type storing the hash of a string, such as a password.
+
+    The column stores what the hash function returns for the value written.
+    Map it with ``readable=False``, since the storage cannot read a hash back.
+
+    :param hash_value: The function hashing a value.
+    :param length: The length of the column.
+    """
+
+    impl = String
+    cache_ok = True
+
+    def __init__(
+        self, hash_value: Callable[[str], str], length: int | None = None
+    ) -> None:
+        super().__init__(length)
+        self.hash_value = hash_value
+
+    def process_bind_param(self, value: str | None, dialect: Dialect) -> str | None:
+        """Hash the value before it is sent to the database."""
+        return None if value is None else self.hash_value(value)
 
 
 class Many:
@@ -704,6 +731,11 @@ class ResourceMapping:
         if not isinstance(key, str):
             raise ValueError(
                 f"{path!r} must be mapped to a column or a hybrid property"
+            )
+        if attribute.readable and isinstance(getattr(expression, "type", None), Hashed):
+            raise ValueError(
+                f"{path!r} stores a hash, which the storage cannot read back: "
+                "map it with readable=False"
             )
 
         writable = attribute.writable

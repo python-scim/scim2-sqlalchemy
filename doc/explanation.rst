@@ -15,6 +15,10 @@ storage maps these tables as they are, rather than bringing tables of its own. A
 for SCIM would hold the resources as JSON documents, which databases filter and index unevenly,
 and would leave the application with two copies of its users.
 
+A server without data of its own, such as a test server, can generate its tables with
+:func:`~scim2_sqlalchemy.generate_mappings`. They hold a column for each attribute, as tables
+designed by hand would, and the same mapping serves them.
+
 A single declaration, the :class:`~scim2_sqlalchemy.ResourceMapping`, serves every task of the
 storage: reading a record, writing it, filtering and sorting. A storage written by hand
 describes the tables twice, once for the conversions and once for the queries, and the two

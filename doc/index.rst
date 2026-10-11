@@ -40,6 +40,8 @@ Start with the page that matches the need:
 
 - To build a SCIM server over the tables of an existing application, follow the
   :doc:`overview`.
+- To build a SCIM server without tables of its own, generate them from the resource types: read
+  :doc:`how-to/generate-the-tables`.
 - To map other data models, publish the stored attributes, commit the changes of each request,
   or compare strings with a custom comparison key, read the :doc:`how-to guides <how-to/index>`.
 - For the reasons behind the behavior of the storage, read :doc:`explanation`.

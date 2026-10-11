@@ -8,6 +8,7 @@ the :doc:`../overview`.
    :maxdepth: 1
 
    map-a-data-model
+   generate-the-tables
    publish-the-stored-attributes
    manage-the-transactions
    compare-strings
