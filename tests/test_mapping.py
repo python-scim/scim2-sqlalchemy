@@ -106,6 +106,12 @@ def test_many_maps_a_multi_valued_complex_attribute_only():
         person_mapping(userName=Many(Person.emails, {"value": Address.value}))
 
 
+def test_link_maps_a_complex_attribute_only():
+    """A Link gives a value and a display, which userName has no room for."""
+    with pytest.raises(ValueError, match="not a complex attribute"):
+        person_mapping(userName=Link(Person.emails, "User"))
+
+
 def test_many_needs_the_delete_orphan_cascade():
     """Without it, replacing the entries would leave the former ones behind."""
     with pytest.raises(ValueError, match="delete-orphan"):

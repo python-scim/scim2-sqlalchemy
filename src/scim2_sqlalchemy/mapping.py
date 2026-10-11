@@ -78,21 +78,26 @@ class Attribute:
 
 
 class Many:
-    """The entries of a multi-valued complex attribute, stored in a child table.
+    """The entries of a multi-valued attribute, stored in a child table.
 
     The entries belong to the resource: writing the resource replaces them.
     The relationship needs ``cascade="all, delete-orphan"``
     (:ref:`sqlalchemy:cascade_delete_orphan`). Its ``order_by`` gives the
-    order of the entries. A sort uses the ``primary`` entry, or else
-    the first one.
+    order of the entries. Without it, the order is the one the database
+    returns. A sort uses the ``primary`` entry, or else the first one.
+
+    The entries of a multi-valued simple attribute, such as a list of strings,
+    are the values of one column of the child table. The storage keeps their
+    order and their duplicates.
 
     :param relationship: The :func:`~sqlalchemy.orm.relationship` from the
         resource record to the entry records.
     :param attributes: The columns of the entry records, by sub-attribute name,
-        such as ``"value"`` or ``"type"``.
+        such as ``"value"`` or ``"type"``. For a simple attribute, the column
+        holding the values.
     """
 
-    def __init__(self, relationship: Any, attributes: Mapping[str, Any]) -> None:
+    def __init__(self, relationship: Any, attributes: Mapping[str, Any] | Any) -> None:
         self.relationship = relationship
         self.attributes = attributes
 
@@ -197,11 +202,13 @@ class _Column:
 
 @dataclass(eq=False)
 class _Collection:
-    """A complex attribute stored in related records.
+    """A multi-valued attribute, or a complex one, stored in related records.
 
     The entries of an owned collection belong to the resource. The others are
     links to the resources of another mapping, the target. A single collection
-    holds one entry at most, such as the manager of a user.
+    holds one entry at most, such as the manager of a user. A simple
+    collection holds the values of a multi-valued simple attribute, in the
+    column it keeps under None.
 
     link_type is the type a Link gives its entries, and type_column the
     constant filters compare it as.
@@ -209,7 +216,7 @@ class _Collection:
 
     binding: AttributeBinding
     relationship: InstrumentedAttribute[Any]
-    columns: dict[str, _Column] = field(default_factory=dict)
+    columns: dict[str | None, _Column] = field(default_factory=dict)
     resource_type: str | None = None
     target: "ResourceMapping | None" = None
     link_type: str | None = None
@@ -231,10 +238,15 @@ class _Collection:
     def single(self) -> bool:
         return not self.binding.is_multivalued
 
+    @property
+    def simple(self) -> bool:
+        return None in self.columns
+
     def column(self, sub_field_name: str | None) -> _Column | None:
-        """Return the column of a sub-attribute, or None for the collection named alone."""
-        if sub_field_name is None:
-            return None
+        """Return the column of a sub-attribute, or of the values of a simple collection named alone.
+
+        A complex collection named alone has no column.
+        """
         if sub_field_name == "type" and self.type_column is not None:
             return self.type_column
         return self.columns.get(sub_field_name)
@@ -247,6 +259,8 @@ class _Collection:
     @property
     def writable(self) -> bool:
         """Whether writing the resource writes these entries."""
+        if self.simple and not self.columns[None].writable:
+            return False
         mutability = self.binding.model.get_field_annotation(
             self.binding.field_name, Mutability
         )
@@ -534,7 +548,7 @@ class ResourceMapping:
             ):
                 if binding is None or column is None:
                     continue
-                collection.columns[binding.sub_field_name] = _Column(  # type: ignore[index]
+                collection.columns[binding.sub_field_name] = _Column(
                     binding,
                     column.expression,
                     column.key,
@@ -568,25 +582,18 @@ class ResourceMapping:
         target = binding.target_type
         is_complex = isclass(target) and issubclass(target, BaseModel)
 
+        key = (binding.model, binding.field_name)
+        if isinstance(value, Many):
+            self._collections[key] = [self._many(path, binding, value)]
+            return
         if isinstance(value, Link):
             value = [value]
-        if isinstance(value, Many) or (
-            isinstance(value, list) and all(isinstance(item, Link) for item in value)
-        ):
-            if not (is_complex and binding.sub_field_name is None) or (
-                isinstance(value, Many) and not binding.is_multivalued
-            ):
-                kind = (
-                    "a multi-valued complex" if isinstance(value, Many) else "a complex"
-                )
+        if isinstance(value, list) and all(isinstance(item, Link) for item in value):
+            if not is_complex or binding.sub_field_name is not None:
                 raise ValueError(
-                    f"{path!r} is not {kind} attribute of {self.model.__name__}"
+                    f"{path!r} is not a complex attribute of {self.model.__name__}"
                 )
-            if isinstance(value, Many):
-                collections = [self._many(path, binding, value)]
-            else:
-                collections = self._links(path, binding, value)
-            self._collections[(binding.model, binding.field_name)] = collections
+            self._collections[key] = self._links(path, binding, value)
             return
 
         if binding.is_multivalued or is_complex:
@@ -611,15 +618,33 @@ class ResourceMapping:
         return collection
 
     def _many(self, path: str, binding: AttributeBinding, many: Many) -> _Collection:
-        """Build the collection of a Many, with the columns of its entries."""
+        """Build the collection of a Many, with the columns of its entries, or the column of its values."""
+        target = binding.target_type
+        is_complex = isclass(target) and issubclass(target, BaseModel)
+        simple = not isinstance(many.attributes, Mapping)
+        if (
+            binding.sub_field_name is not None
+            or not binding.is_multivalued
+            or is_complex == simple
+        ):
+            kind = "simple" if simple else "complex"
+            raise ValueError(
+                f"{path!r} is not a multi-valued {kind} attribute of "
+                f"{self.model.__name__}"
+            )
         collection = self._collection(path, binding, many.relationship)
         if not collection.relationship_property.cascade.delete_orphan:
             raise ValueError(
                 f"The relationship of {path!r} needs the delete-orphan cascade"
             )
+        if simple:
+            collection.columns[None] = self._build_column(
+                path, binding, many.attributes
+            )
+            return collection
         for sub_path, expression in many.attributes.items():
             sub_binding = self._resolve(f"{path}.{sub_path}")
-            collection.columns[sub_binding.sub_field_name] = self._build_column(  # type: ignore[index]
+            collection.columns[sub_binding.sub_field_name] = self._build_column(
                 f"{path}.{sub_path}", sub_binding, expression
             )
         return collection
@@ -668,6 +693,11 @@ class ResourceMapping:
         A read-only attribute, or a hybrid property without a setter, is never
         written.
         """
+        if binding.sub_field_name is not None and binding.target_is_multivalued:
+            raise ValueError(
+                f"{path!r} holds several values in a complex attribute, "
+                "which the storage cannot map"
+            )
         attribute = value if isinstance(value, Attribute) else Attribute(value)
         expression = attribute.expression
         key = getattr(expression, "key", None)

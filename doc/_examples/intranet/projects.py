@@ -25,6 +25,7 @@ from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 
 from scim2_sqlalchemy import Link
+from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
 from scim2_sqlalchemy import SqlAlchemyStorage
 
@@ -76,8 +77,19 @@ class ProjectRecord(Base):
 
     owner: Mapped[Account | None] = relationship()
     members: Mapped[list[Account]] = relationship(secondary=project_members)
+    tags: Mapped[list["ProjectTag"]] = relationship(
+        cascade="all, delete-orphan", order_by="ProjectTag.id"
+    )
 
     __mapper_args__ = {"version_id_col": revision}
+
+
+class ProjectTag(Base):
+    __tablename__ = "project_tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"))
+    name: Mapped[str]
 
 
 class UserReference(ComplexAttribute):
@@ -94,6 +106,7 @@ class Project(Resource):
     title: str | None = None
     owner: UserReference | None = None
     members: list[UserReference] | None = None
+    tags: list[str] | None = None
 
 
 PROJECTS = ResourceMapping(
@@ -105,6 +118,7 @@ PROJECTS = ResourceMapping(
         "title": ProjectRecord.title,
         "owner": Link(ProjectRecord.owner, "User"),
         "members": Link(ProjectRecord.members, "User"),
+        "tags": Many(ProjectRecord.tags, ProjectTag.name),
         "meta.created": ProjectRecord.created_at,
         "meta.lastModified": ProjectRecord.updated_at,
     },
