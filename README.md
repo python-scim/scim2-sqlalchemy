@@ -1,3 +1,5 @@
+<img alt="python-scim logo" src="https://raw.githubusercontent.com/python-scim/.github/refs/heads/main/python-scim.svg" height="72" align="right">
+
 # scim2-sqlalchemy
 
 Store [SCIM](https://scim.cloud) resources in the tables of an application, with the [SQLAlchemy](https://www.sqlalchemy.org) ORM.
