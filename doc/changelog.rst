@@ -22,6 +22,11 @@ Added
   ``asyncio`` extra.
 - :meth:`ResourceMapping.schemas <scim2_sqlalchemy.ResourceMapping.schemas>`, which publishes the
   attributes a mapping stores.
+- :func:`~scim2_sqlalchemy.generate_mappings`, which generates the tables and the mappings of
+  the resource types of a provider. A function of the application decides whether each attribute
+  is stored, and with which column type.
+- :class:`~scim2_sqlalchemy.Hashed`, a column type storing the hash of a value, such as a
+  password.
 - Filters, sorts and uniqueness checks compare strings with the comparison key of the policy of
   the provider: exactly on SQLite, and approximately on PostgreSQL.
 - A column of type :class:`~sqlalchemy.types.Enum` holds the string it stores: the name of the
