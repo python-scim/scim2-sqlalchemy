@@ -10,6 +10,19 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["scim", "scim2", "provisioning", "sqlalchemy", "rfc7643", "rfc7644"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Environment :: Web Environment",
+    "Programming Language :: Python",
+    "Operating System :: OS Independent",
+]
 authors = [
     { name = "Éloi Rivard", email = "eloi@yaal.coop" }
 ]
@@ -114,6 +127,7 @@ env_list = [
     "py312",
     "py313",
     "py314",
+    "py315",
     "minversions",
     "doc",
     "coverage",
