@@ -115,6 +115,27 @@ Keep the expression ``NULL`` when the column is ``NULL``, as ``status == "enable
 filter ``active pr`` then holds only for the accounts with a status. A request removing the
 attribute passes :data:`None` to the setter.
 
+Map an enumerated column
+------------------------
+
+Map a string attribute to a column of type :class:`~sqlalchemy.types.Enum` directly, without a
+property. The attribute holds the string the column stores: the name of the member, or its value
+when the column has ``values_callable``. Take this enumeration:
+
+.. code-block:: python
+
+   class Color(enum.Enum):
+       Red = "Crimson"
+       blue = "azure"
+
+A column ``Enum(Color)`` gives the strings ``Red`` and ``blue``. With
+``values_callable=lambda members: [member.value for member in members]``, it gives ``Crimson``
+and ``azure``.
+
+Filters and sorts compare these strings, as on any string column, and not the order of the
+members. This also holds for the native enumerations of PostgreSQL. The storage refuses a string
+outside the enumeration with a 400 error.
+
 Map a write-only or a read-only attribute
 -----------------------------------------
 

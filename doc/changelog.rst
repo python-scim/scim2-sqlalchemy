@@ -6,32 +6,10 @@ Changelog
 
 Added
 ^^^^^
-- :class:`~scim2_sqlalchemy.ResourceMapping`, which stores the resources of a SCIM model in the
-  records of a SQLAlchemy model, with :class:`~scim2_sqlalchemy.Attribute`,
-  :class:`~scim2_sqlalchemy.Many` and :class:`~scim2_sqlalchemy.Link`. A
-  :class:`~scim2_sqlalchemy.Link` links to one resource, such as a ``manager``, or to
-  several, such as ``members``. A list of Links links to several resource types, such as the
-  users and the groups of a group. A Link can give its entries a ``type``. A
-  :class:`~scim2_sqlalchemy.Many` with a column stores a list of values, such as a list of
-  strings.
-- :class:`~scim2_sqlalchemy.SqlAlchemyStorage` and
-  :class:`~scim2_sqlalchemy.AsyncSqlAlchemyStorage`, which serve the mappings to
+- Initial release: :class:`~scim2_sqlalchemy.SqlAlchemyStorage` and
+  :class:`~scim2_sqlalchemy.AsyncSqlAlchemyStorage` serve SQLAlchemy models to
   :doc:`scim2-server <scim2_server:index>`. They filter, sort and page the resources in the
-  database, on one resource type or at the root of the server. They page with ``startIndex``, or
-  with the cursors of :rfc:`9865`, which give stable pages. The asynchronous storage needs the
-  ``asyncio`` extra.
-- :meth:`ResourceMapping.schemas <scim2_sqlalchemy.ResourceMapping.schemas>`, which publishes the
-  attributes a mapping stores.
-- :func:`~scim2_sqlalchemy.generate_mappings`, which generates the tables and the mappings of
-  the resource types of a provider. A function of the application decides whether each attribute
-  is stored, and with which column type.
-- :class:`~scim2_sqlalchemy.Hashed`, a column type storing the hash of a value, such as a
-  password.
-- Filters, sorts and uniqueness checks compare strings with the comparison key of the policy of
-  the provider: exactly on SQLite, and approximately on PostgreSQL.
-- A column of type :class:`~sqlalchemy.types.Enum` holds the string it stores: the name of the
-  member, or its value with ``values_callable``. Filters and sorts compare this string, also on
-  the native enumerations of PostgreSQL. A string outside the enumeration is refused with
-  ``invalidValue``.
-- A search or a read does not load the collections that ``attributes`` and ``excludedAttributes``
-  remove from the response, such as the members of the groups.
+  database, with ``startIndex`` or with the cursors of :rfc:`9865`.
+- :class:`~scim2_sqlalchemy.ResourceMapping` maps the resources to existing SQLAlchemy models.
+  :func:`~scim2_sqlalchemy.generate_mappings` generates the tables and the mappings for a server
+  without a database of its own.
