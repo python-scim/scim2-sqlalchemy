@@ -144,12 +144,40 @@ The mapping makes the password write-only:
 A write-only attribute keeps its stored value when a request does not carry it, since a
 resource never carries it back.
 
+Map a list of values
+--------------------
+
+Map a multi-valued attribute holding plain values, such as a list of strings, with
+:class:`~scim2_sqlalchemy.Many`. Give it the :func:`~sqlalchemy.orm.relationship` to the child
+model, and the column holding the values. The projects of the intranet have tags, one per row of
+a child table:
+
+.. literalinclude:: ../_examples/intranet/projects.py
+   :language: python
+   :start-at: class ProjectTag
+   :end-before: class UserReference
+
+.. code-block:: python
+
+   {"tags": Many(ProjectRecord.tags, ProjectTag.name)}
+
+Declare the relationship with ``cascade="all, delete-orphan"``: writing the resource replaces
+its values, and the :ref:`delete-orphan <sqlalchemy:cascade_delete_orphan>` cascade deletes the
+former ones. A relationship without this cascade raises a :class:`ValueError`. The ``order_by``
+of the relationship gives the order of the values, and the storage keeps their duplicates.
+
+A filter such as ``tags eq "moon"`` holds when one value matches, and ``tags[value eq "moon"]``
+selects the same projects. A sort on the attribute uses the first value.
+
+A multi-valued sub-attribute of a complex attribute cannot be mapped, and raises a
+:class:`ValueError`.
+
 Map entries of a child table
 ----------------------------
 
-Map a multi-valued attribute whose entries belong to the resource, such as ``emails``, with
-:class:`~scim2_sqlalchemy.Many`. Give it the :func:`~sqlalchemy.orm.relationship` to the child model, and the column of
-each sub-attribute:
+Map a multi-valued complex attribute whose entries belong to the resource, such as ``emails``,
+with :class:`~scim2_sqlalchemy.Many` too. Give it the relationship to the child model, and the
+column of each sub-attribute:
 
 .. code-block:: python
 
@@ -164,11 +192,9 @@ each sub-attribute:
        )
    }
 
-Declare the relationship with ``cascade="all, delete-orphan"``: writing the resource replaces
-its entries, and the :ref:`delete-orphan <sqlalchemy:cascade_delete_orphan>` cascade deletes the
-former ones. A relationship without this cascade raises a
-:class:`ValueError`. The ``order_by`` of the relationship gives the order of the entries. A sort
-on the attribute uses the entry marked ``primary``, or else the first entry.
+The relationship needs the same cascade as for a list of values, and its ``order_by`` gives the
+order of the entries. A sort on the attribute uses the entry marked ``primary``, or else the
+first entry.
 
 Link to other resources
 -----------------------
@@ -233,7 +259,7 @@ Map a custom resource type
 
 Map a resource type of the application the same way as a standard one. Declare its SCIM model
 first: for the steps, read :doc:`scim2_models:how-to/define-custom-models`. The intranet serves
-its projects, whose owner and members are users:
+its projects, whose owner and members are users, and which have tags:
 
 .. literalinclude:: ../_examples/intranet/projects.py
    :language: python
@@ -273,10 +299,13 @@ Create a project owned by a user:
    >>> client = Client(WSGIApplication(create_storage(session, provider), provider))
    >>> user = client.post("/v2/Users", json={"userName": "bjensen"}).json
    >>> project = client.post(
-   ...     "/v2/Projects", json={"code": "APOLLO", "owner": {"value": user["id"]}}
+   ...     "/v2/Projects",
+   ...     json={"code": "APOLLO", "owner": {"value": user["id"]}, "tags": ["moon"]},
    ... ).json
    >>> project["owner"]
    {'value': '...', '$ref': 'http://localhost/v2/Users/...', 'display': 'bjensen'}
+   >>> project["tags"]
+   ['moon']
    >>> session.close()
    >>> engine.dispose()
 

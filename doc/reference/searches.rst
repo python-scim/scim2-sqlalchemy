@@ -12,13 +12,14 @@ what a search supports:
    * - Comparison operators
      - ``eq``, ``ne``, ``co``, ``sw``, ``ew``, ``gt``, ``ge``, ``lt``, ``le``, and ``pr``.
    * - Logical operators
-     - ``and``, ``or``, ``not``, and value selections such as ``emails[type eq "work"]``.
+     - ``and``, ``or``, ``not``, and value selections such as ``emails[type eq "work"]``, or
+       ``tags[value eq "moon"]`` for a list of values.
    * - Filtered attributes
      - Columns, :class:`hybrid properties <sqlalchemy.ext.hybrid.hybrid_property>`, the entries of a :class:`~scim2_sqlalchemy.Many`, and the
        ``value``, the display name and the ``type`` of a :class:`~scim2_sqlalchemy.Link`.
    * - Sorted attributes
      - Columns, hybrid properties, and the entries of a :class:`~scim2_sqlalchemy.Many`, on the
-       ``primary`` entry or else the first one.
+       ``primary`` entry or else the first one, or on the first value of a list of values.
    * - Pagination
      - ``startIndex`` and ``count``, or the cursors of :rfc:`9865`.
    * - Resource types

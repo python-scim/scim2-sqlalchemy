@@ -107,11 +107,26 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         self.comparator = comparator
         self.scope = scope
 
-    def _path(self, attr_path: AttrPath) -> AttrPath:
+    def _resolve(
+        self,
+        attr_path: AttrPath,
+        resolve: Callable[..., AttributeBinding | None],
+    ) -> AttributeBinding | None:
+        """Bind the attribute path of a comparison or of a presence test.
+
+        Within a value selection of a simple attribute, such as
+        tags[value eq "x"], value is the entry itself, and any other attribute
+        matches nothing, as ScimFilter.match has it.
+        """
         if self.scope is None:
-            return attr_path
-        scope_path, _ = self.scope
-        return AttrPath(scope_path.attr, attr_path.attr, scope_path.uri)
+            return resolve(attr_path, strict=False)
+        scope_path, scope = self.scope
+        if scope.simple:
+            own = attr_path.attr.lower() == "value" and not attr_path.sub_attr
+            return scope.binding if own else None
+        return resolve(
+            AttrPath(scope_path.attr, attr_path.attr, scope_path.uri), strict=False
+        )
 
     def _lookup(
         self, binding: AttributeBinding
@@ -146,9 +161,7 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         return collection.exists(condition)
 
     def visit_comparison(self, node: Comparison) -> ColumnElement[bool]:
-        binding = self.filter.resolve_comparison(
-            self._path(node.attr_path), strict=False
-        )
+        binding = self._resolve(node.attr_path, self.filter.resolve_comparison)
         if binding is None:
             return false()
         targets = self._targets(binding)
@@ -181,12 +194,12 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         )
 
     def visit_present(self, node: Present) -> ColumnElement[bool]:
-        binding = self.filter.resolve(self._path(node.attr_path), strict=False)
+        binding = self._resolve(node.attr_path, self.filter.resolve)
         if binding is None:
             return false()
         pairs = self._lookup(binding)
         in_collection = pairs[0][0] is not None
-        if in_collection and binding.sub_field_name is None:
+        if in_collection and binding.sub_field_name is None and pairs[0][1] is None:
             return or_(*(collection.exists() for collection, _ in pairs))  # type: ignore[union-attr]
         if all(column is not None and column.readable for _, column in pairs):
             return or_(

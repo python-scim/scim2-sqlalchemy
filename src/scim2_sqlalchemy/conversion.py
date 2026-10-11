@@ -85,10 +85,10 @@ def _to_scim(
         if Path[model](f"{collection.binding.urn}.$ref").resolve() is not None:  # type: ignore[valid-type]
             endpoint = endpoints.get(collection.resource_type)  # type: ignore[arg-type]
         _, entries = read.setdefault(collection.binding.urn, (collection.single, []))
-        entries.extend(
-            _read_entry(collection, entry, endpoint)
-            for entry in _related(collection, record)
-        )
+        for related in _related(collection, record):
+            entry = _read_entry(collection, related, endpoint)
+            if entry is not None:
+                entries.append(entry)
     for urn, (single, entries) in read.items():
         if entries:
             Path[model](urn).set(resource, entries[0] if single else entries)  # type: ignore[valid-type]
@@ -119,13 +119,13 @@ def _entries(collection: _Collection, resource: Resource[Any]) -> list[Any]:
     return list(value or [])
 
 
-def _read_entry(
-    collection: _Collection, entry: Any, endpoint: str | None
-) -> dict[str, Any]:
-    """Return the values of an entry, by sub-attribute name.
+def _read_entry(collection: _Collection, entry: Any, endpoint: str | None) -> Any:
+    """Return the values of an entry, by sub-attribute name, or the value of an entry of a simple collection.
 
     A link gets a $ref when the endpoint of the resources it links to is known.
     """
+    if collection.simple:
+        return _read(collection.columns[None], entry)
     values = {}
     for sub_field_name, column in collection.columns.items():
         value = _read(column, entry)
@@ -177,10 +177,13 @@ def _from_scim(
 
 def _write_entry(collection: _Collection, entry: Any) -> Any:
     record = collection.entry_class()
-    for sub_field_name, column in collection.columns.items():
+    if collection.simple:
+        setattr(record, collection.columns[None].key, _as_stored(entry))
+        return record
+    for column in collection.columns.values():
         if not column.writable:
             continue
-        value = getattr(entry, sub_field_name, None)
+        value = getattr(entry, column.binding.target_field_name, None)
         if value is not None:
             setattr(record, column.key, _as_stored(value))
     return record
