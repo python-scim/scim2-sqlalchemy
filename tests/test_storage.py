@@ -24,6 +24,7 @@ from scim2_sqlalchemy import ResourceMapping
 
 from .models import ENTERPRISE
 from .models import BadgeRecord
+from .models import CertificateRecord
 from .models import EmailRecord
 from .models import UserRecord
 from .models import groups_mapping
@@ -65,6 +66,20 @@ def test_an_update_replaces_the_emails(sync_storage_factory, session, user_type)
     storage.update(user_type, user)
 
     assert session.scalars(select(EmailRecord.value)).all() == ["b@example.org"]
+
+
+def test_a_binary_value_is_read_back_as_sent(storage_factory, user_type):
+    """The column holds the decoded bytes, and the resource encodes them in base64 again."""
+    certificates = Many(UserRecord.certificates, {"value": CertificateRecord.value})
+    users = users_mapping({"x509Certificates": certificates})
+    storage = storage_factory({"User": users, "Group": groups_mapping()})
+    user = UserModel.model_validate(
+        {"userName": "bjensen", "x509Certificates": [{"value": "TUlJRA=="}]}
+    )
+
+    user = storage.create(user_type, user)
+
+    assert user.model_dump()["x509Certificates"] == [{"value": "TUlJRA=="}]
 
 
 def test_a_password_is_written_hashed_and_never_read(

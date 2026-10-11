@@ -66,6 +66,9 @@ class UserRecord(Base):
     emails: Mapped[list["EmailRecord"]] = relationship(
         cascade="all, delete-orphan", order_by="EmailRecord.id"
     )
+    certificates: Mapped[list["CertificateRecord"]] = relationship(
+        cascade="all, delete-orphan", order_by="CertificateRecord.id"
+    )
     groups: Mapped[list["GroupRecord"]] = relationship(
         secondary=membership, back_populates="members"
     )
@@ -113,6 +116,16 @@ class EmailRecord(Base):
     value: Mapped[str | None]
     type: Mapped[str | None]
     primary: Mapped[bool | None]
+
+
+class CertificateRecord(Base):
+    __tablename__ = "certificates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    value: Mapped[bytes]
 
 
 class GroupRecord(Base):

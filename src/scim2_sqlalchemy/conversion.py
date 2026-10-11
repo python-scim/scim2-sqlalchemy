@@ -1,3 +1,4 @@
+import base64
 import datetime
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -24,9 +25,12 @@ def _as_scim(value: Any) -> Any:
     """Return a value read from the database in the form SCIM holds it.
 
     A date without a time zone is taken as UTC, since SQLite drops the zone.
+    Binary values are encoded in base64, the form the models decode them from.
     """
     if isinstance(value, datetime.datetime) and value.tzinfo is None:
         return value.replace(tzinfo=datetime.UTC)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode()
     return value
 
 
