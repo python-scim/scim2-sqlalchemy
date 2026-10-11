@@ -113,11 +113,30 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         scope_path, _ = self.scope
         return AttrPath(scope_path.attr, attr_path.attr, scope_path.uri)
 
-    def _target(self, binding: AttributeBinding) -> tuple[_Collection | None, _Column]:
-        collection, column = self.mapping._lookup(binding)
-        if column is None or not column.readable:
+    def _lookup(
+        self, binding: AttributeBinding
+    ) -> list[tuple[_Collection | None, _Column | None]]:
+        """Return the collections holding an attribute, with its column in each, as the mapping does.
+
+        Within a value selection, only the collection of the selection holds
+        the attribute.
+        """
+        pairs = self.mapping._lookup(binding)
+        if self.scope is None:
+            return pairs
+        _, scope = self.scope
+        return [
+            (collection, column) for collection, column in pairs if collection is scope
+        ]
+
+    def _targets(
+        self, binding: AttributeBinding
+    ) -> list[tuple[_Collection | None, _Column]]:
+        """Return the collections holding an attribute with its column in each, refusing an attribute that one of them does not let filters read."""
+        pairs = self._lookup(binding)
+        if any(column is None or not column.readable for _, column in pairs):
             raise _unmapped(binding)
-        return collection, column
+        return pairs  # type: ignore[return-value]
 
     def _in_collection(
         self, collection: _Collection | None, condition: ColumnElement[bool]
@@ -132,35 +151,55 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         )
         if binding is None:
             return false()
-        collection, column = self._target(binding)
+        targets = self._targets(binding)
         value = coerce_value(binding, node.value, node.op)
 
         # 'emails ne "x"' holds when no email is "x", while
         # 'emails[value ne "x"]' holds when one email is not "x".
         if (
             node.op == CompareOperator.ne
-            and collection is not None
+            and targets[0][0] is not None
             and self.scope is None
         ):
-            equal = _compare(self.comparator, column, CompareOperator.eq, value)
-            return not_(collection.exists(equal))
-        condition = _compare(self.comparator, column, node.op, value)
-        return self._in_collection(collection, condition)
+            return not_(
+                or_(
+                    *(
+                        collection.exists(  # type: ignore[union-attr]
+                            _compare(self.comparator, column, CompareOperator.eq, value)
+                        )
+                        for collection, column in targets
+                    )
+                )
+            )
+        return or_(
+            *(
+                self._in_collection(
+                    collection, _compare(self.comparator, column, node.op, value)
+                )
+                for collection, column in targets
+            )
+        )
 
     def visit_present(self, node: Present) -> ColumnElement[bool]:
         binding = self.filter.resolve(self._path(node.attr_path), strict=False)
         if binding is None:
             return false()
-        collection, column = self.mapping._lookup(binding)
-        if collection is not None and binding.sub_field_name is None:
-            return collection.exists() if self.scope is None else true()
-        if column is not None and column.readable:
-            return self._in_collection(collection, _present(column))
+        pairs = self._lookup(binding)
+        in_collection = pairs[0][0] is not None
+        if in_collection and binding.sub_field_name is None:
+            return or_(*(collection.exists() for collection, _ in pairs))  # type: ignore[union-attr]
+        if all(column is not None and column.readable for _, column in pairs):
+            return or_(
+                *(
+                    self._in_collection(collection, _present(column))  # type: ignore[arg-type]
+                    for collection, column in pairs
+                )
+            )
 
         sub_columns = [
             column for column in self.mapping._sub_columns(binding) if column.readable
         ]
-        if collection is not None or not sub_columns:
+        if in_collection or not sub_columns:
             raise _unmapped(binding)
         return or_(*(_present(column) for column in sub_columns))
 
@@ -175,13 +214,26 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         binding = self.filter.resolve(node.attr_path, strict=False)
         if binding is None:
             return false()
-        collection, _ = self.mapping._lookup(binding)
-        if collection is None:
+        collections = [
+            collection
+            for collection, _ in self.mapping._lookup(binding)
+            if collection is not None
+        ]
+        if not collections:
             raise _unmapped(binding)
-        scoped = _FilterTranslator(
-            self.mapping, self.filter, self.comparator, (node.attr_path, collection)
+        return or_(
+            *(
+                collection.exists(
+                    _FilterTranslator(
+                        self.mapping,
+                        self.filter,
+                        self.comparator,
+                        (node.attr_path, collection),
+                    ).visit(node.val_filter)
+                )
+                for collection in collections
+            )
         )
-        return collection.exists(scoped.visit(node.val_filter))
 
 
 def _present(column: _Column) -> ColumnElement[bool]:
@@ -255,7 +307,7 @@ def _sort_key(
     binding = search_request.sort_binding(mapping.model)
     if binding is None:
         return None
-    collection, column = mapping._lookup(binding)
+    collection, column = mapping._lookup(binding)[0]
     if (
         column is None
         or not column.readable
@@ -442,7 +494,6 @@ def _load_statement(
         select(mapping.record)
         .where(mapping._id.expression == key)
         .options(*mapping._loader_options(mapping._returned_collections(parameters)))
-        .execution_options(populate_existing=True)
     )
 
 

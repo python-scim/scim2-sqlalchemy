@@ -184,17 +184,6 @@ def test_the_display_of_a_member_is_derived(storage, user_type, group_type):
     assert group.members[0].display == "Alice"
 
 
-def test_the_type_of_a_member_is_not_stored(storage, user_type, group_type):
-    """members.type is not mapped, so a value for it raises a 400."""
-    alice = storage.create(user_type, UserModel(user_name="alice"))
-
-    with pytest.raises(InvalidValueException):
-        storage.create(
-            group_type,
-            Group(display_name="admins", members=[{"value": alice.id, "type": "User"}]),
-        )
-
-
 def test_a_group_links_to_its_members(storage, user_type, group_type):
     """A member is read back with the id and the displayName of the user."""
     alice = storage.create(

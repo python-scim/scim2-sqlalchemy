@@ -79,17 +79,19 @@ def _to_scim(
         if value is not None:
             Path[model](column.binding.urn).set(resource, value)  # type: ignore[valid-type]
 
+    read: dict[str, tuple[bool, list[dict[str, Any]]]] = {}
     for collection in collections:
         endpoint = None
         if Path[model](f"{collection.binding.urn}.$ref").resolve() is not None:  # type: ignore[valid-type]
             endpoint = endpoints.get(collection.resource_type)  # type: ignore[arg-type]
-        entries = [
+        _, entries = read.setdefault(collection.binding.urn, (collection.single, []))
+        entries.extend(
             _read_entry(collection, entry, endpoint)
             for entry in _related(collection, record)
-        ]
+        )
+    for urn, (single, entries) in read.items():
         if entries:
-            value = entries[0] if collection.single else entries
-            Path[model](collection.binding.urn).set(resource, value)  # type: ignore[valid-type]
+            Path[model](urn).set(resource, entries[0] if single else entries)  # type: ignore[valid-type]
 
     resource.id = str(_read(mapping._id, record))
     resource.meta = Meta(
@@ -132,6 +134,8 @@ def _read_entry(
             if endpoint is not None:
                 values["$ref"] = f"{endpoint}/{value}"
         values[column.binding.urn.rsplit(".", 1)[-1]] = value
+    if collection.link_type is not None:
+        values["type"] = collection.link_type
     return values
 
 
@@ -158,7 +162,7 @@ def _from_scim(
             continue
         setattr(record, column.key, None if value is None else _as_stored(value))
 
-    for collection in mapping._collections.values():
+    for collection in mapping._all_collections():
         if not collection.writable:
             continue
         if collection.owned:
@@ -182,16 +186,17 @@ def _write_entry(collection: _Collection, entry: Any) -> Any:
     return record
 
 
-def _link_ids(
+def _link_entries(
     mapping: ResourceMapping, resource: Resource[Any]
-) -> dict[_Collection, list[str]]:
-    """Return the identifiers each writable Link of a resource links to.
+) -> list[tuple[list[_Collection], list[Any]]]:
+    """Return the entries of each written attribute of a resource linking to other resources, with the collections of its Links.
 
     A link is stored by its value, so an entry without one, such as an entry
     with a $ref only, raises InvalidValueException rather than being lost.
     """
-    links = {}
-    for collection in mapping._collections.values():
+    links = []
+    for collections in mapping._collections.values():
+        collection = collections[0]
         if collection.owned or not collection.writable:
             continue
         entries = _entries(collection, resource)
@@ -199,7 +204,7 @@ def _link_ids(
             raise InvalidValueException(
                 detail=f"'{collection.binding.urn}' holds an entry without value"
             )
-        links[collection] = [entry.value for entry in entries]
+        links.append((collections, entries))
     return links
 
 
@@ -247,7 +252,10 @@ def _check_storable(
                     detail=f"'{binding.urn}' cannot be removed on this server",
                 )
             continue
-        if storage in (_Storage.derived, _Storage.ref) or value in (None, current):
+        if storage in (_Storage.derived, _Storage.ref, _Storage.link_type) or value in (
+            None,
+            current,
+        ):
             continue
         if storage == _Storage.read_only:
             raise MutabilityException(
@@ -264,7 +272,7 @@ def _check_enumerated(
     mapping: ResourceMapping, binding: AttributeBinding, value: Any
 ) -> None:
     """Refuse a string that an Enum column does not store, rather than failing in the database."""
-    _, column = mapping._lookup(binding)
+    _, column = mapping._lookup(binding)[0]
     if column is None or column.enumeration is None:
         return
     stored = column.enumeration.enums

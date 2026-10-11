@@ -214,18 +214,62 @@ def test_an_attribute_the_mapping_only_reads_is_published_read_only():
     assert locale.mutability == Mutability.read_only
 
 
-def test_a_link_publishes_its_value_its_ref_and_a_read_only_display():
-    """A member is published before any storage links the mapping, with its $ref to users only."""
+def test_a_link_publishes_its_value_its_ref_its_type_and_a_read_only_display():
+    """A member is published before any storage links the mapping, with its $ref to the resource types of its Links."""
     (group,) = groups_mapping().schemas()
 
     (members,) = [a for a in group.attributes if a.name == "members"]
     assert [(sub.name, sub.mutability) for sub in members.sub_attributes] == [
         ("value", Mutability.immutable),
         ("$ref", Mutability.immutable),
+        ("type", Mutability.immutable),
         ("display", Mutability.read_only),
     ]
     (ref,) = [sub for sub in members.sub_attributes if sub.name == "$ref"]
+    assert ref.reference_types == ["User", "Group"]
+
+
+def test_a_link_without_type_does_not_publish_the_type():
+    """The type of a member is published only when its Links give one."""
+    (group,) = groups_mapping({"members": Link(GroupRecord.members, "User")}).schemas()
+
+    (members,) = [a for a in group.attributes if a.name == "members"]
+    assert "type" not in [sub.name for sub in members.sub_attributes]
+    (ref,) = [sub for sub in members.sub_attributes if sub.name == "$ref"]
     assert ref.reference_types == ["User"]
+
+
+@pytest.mark.parametrize(
+    "links, message",
+    [
+        ([], "at least one"),
+        (
+            [Link(GroupRecord.members, "User"), Link(GroupRecord.subgroups, "User")],
+            "one Link per resource type",
+        ),
+        (
+            [
+                Link(GroupRecord.members, "User", type="User"),
+                Link(GroupRecord.subgroups, "Group"),
+            ],
+            "every Link of 'members' has a type, or none",
+        ),
+        ([Link(GroupRecord.members, "User"), "User"], "map it with Many or Link"),
+    ],
+    ids=["empty", "same resource type", "type on some", "not a Link"],
+)
+def test_the_links_of_an_attribute_are_checked(links, message):
+    """The Links of an attribute link to distinct resource types, and give a type all or none."""
+    with pytest.raises(ValueError, match=message):
+        groups_mapping({"members": links})
+
+
+def test_a_link_type_needs_a_type_sub_attribute():
+    """The manager has no type sub-attribute, so its Link cannot give one."""
+    with pytest.raises(ValueError, match="has no type sub-attribute"):
+        users_mapping(
+            {f"{ENTERPRISE}:manager": Link(UserRecord.manager, "User", type="User")}
+        )
 
 
 def test_a_complex_attribute_only_read_is_published_read_only():
