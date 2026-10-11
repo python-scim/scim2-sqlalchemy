@@ -1,6 +1,7 @@
 import operator
 from collections.abc import Callable
 from typing import Any
+from typing import TypeVarTuple
 
 from scim2_models import AttributeBinding
 from scim2_models import InvalidCursorException
@@ -46,6 +47,7 @@ from .keyset import _keyset_order
 from .mapping import ResourceMapping
 from .mapping import _Collection
 from .mapping import _Column
+from .mapping import _python_type
 
 _ORDERINGS: dict[CompareOperator, Callable[[Any, Any], Any]] = {
     CompareOperator.eq: operator.eq,
@@ -56,11 +58,13 @@ _ORDERINGS: dict[CompareOperator, Callable[[Any, Any], Any]] = {
 }
 
 
+_Row = TypeVarTuple("_Row")
+
+
 def _as_key(column: _Column, value: Any) -> Any:
     """Return an identifier in the type of its column, or None when it cannot have that type."""
-    try:
-        python_type = column.expression.type.python_type
-    except NotImplementedError:
+    python_type = _python_type(column.expression)
+    if python_type is None:
         return value
     try:
         return python_type(value)
@@ -381,14 +385,18 @@ def _where(
     return _FilterTranslator(mapping, scim_filter, comparator).visit(scim_filter.ast)
 
 
-def _cursor_page(page: Select[Any], search_request: SearchRequest[Any]) -> Select[Any]:
+def _cursor_page(
+    page: Select[*_Row], search_request: SearchRequest[Any]
+) -> Select[*_Row]:
     """Limit a cursor page to count + 1 rows, the last one telling whether a page follows."""
     if search_request.count is None:
         return page
     return page.limit(search_request.count + 1)
 
 
-def _index_page(page: Select[Any], search_request: SearchRequest[Any]) -> Select[Any]:
+def _index_page(
+    page: Select[*_Row], search_request: SearchRequest[Any]
+) -> Select[*_Row]:
     """Limit a page to the records from startIndex, at most count of them."""
     page = page.offset(search_request.start_index_0 or 0)
     if search_request.count is None:
@@ -401,7 +409,7 @@ def _search_statements(
     search_request: SearchRequest[Any],
     comparator: _Comparator,
     anchor: _Anchor | None = None,
-) -> tuple[Select[tuple[int]], Select[tuple[Any, Any, str]]]:
+) -> tuple[Select[int], Select[Any, Any, str]]:
     """Return the statement counting the matching records, and the one selecting a page of them.
 
     The page lists each record with its sort value and its identifier as
@@ -443,7 +451,7 @@ def _root_statements(
     search_request: SearchRequest[Any],
     comparator: _Comparator,
     anchor: _Anchor | None = None,
-) -> tuple[Select[tuple[int]], Select[tuple[int, str, Any]]]:
+) -> tuple[Select[int], Select[int, str, Any]]:
     """Return the statement counting the matching records of several mappings, and the one selecting a page of them.
 
     The page lists the position of the mapping, the identifier of each
@@ -496,7 +504,7 @@ def _root_statements(
 
 def _records_statement(
     mapping: ResourceMapping, ids: list[str], parameters: ResponseParameters[Any]
-) -> Select[tuple[str, Any]]:
+) -> Select[str, Any]:
     """Return the statement loading the records of a page, each with its identifier as text."""
     keys = [_as_key(mapping._id, value) for value in ids]
     return (

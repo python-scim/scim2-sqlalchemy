@@ -49,12 +49,21 @@ class _Storage(Enum):
     link_type = "link type"
 
 
+def _python_type(expression: Any) -> type | None:
+    """Return the Python type of the values of an expression, or None if its type tells none.
+
+    SQLAlchemy 2.0 raises NotImplementedError for such a type, and 2.1 returns object.
+    """
+    try:
+        python_type: type = expression.type.python_type
+    except NotImplementedError:
+        return None
+    return None if python_type is object else python_type
+
+
 def _holds_text(expression: Any) -> bool:
     """Whether an expression holds strings. A type that tells no Python type is taken as text."""
-    try:
-        return expression.type.python_type is str
-    except NotImplementedError:
-        return True
+    return _python_type(expression) in (str, None)
 
 
 class Attribute:

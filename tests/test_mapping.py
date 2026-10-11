@@ -39,6 +39,17 @@ class Opaque(UserDefinedType[str]):
     cache_ok = True
 
 
+class Unknown(UserDefinedType[str]):
+    """A column type refusing to tell its Python type, as SQLAlchemy 2.0 types do."""
+
+    cache_ok = True
+
+    @property
+    def python_type(self) -> type:
+        """Refuse to tell the Python type."""
+        raise NotImplementedError
+
+
 class Person(Base):
     __tablename__ = "people"
 
@@ -50,6 +61,7 @@ class Person(Base):
     other_version: Mapped[int] = mapped_column()
     emails: Mapped[list["Address"]] = relationship()
     opaque: Mapped[str] = mapped_column(Opaque())
+    unknown: Mapped[str] = mapped_column(Unknown())
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -182,12 +194,14 @@ def test_a_link_displays_nothing_without_a_name():
     assert groups._display() is None
 
 
-def test_a_column_type_without_python_type_holds_text():
+@pytest.mark.parametrize("record_column", ["opaque", "unknown"])
+def test_a_column_type_without_python_type_holds_text(record_column):
     """A column whose type tells no Python type is compared as it is."""
-    mapping = person_mapping(nickName=Person.opaque)
+    expression = getattr(Person, record_column)
+    mapping = person_mapping(nickName=expression)
     column = mapping._column("nickName")
 
-    assert _holds_text(Person.opaque)
+    assert _holds_text(expression)
     assert _as_key(column, "x") == "x"
 
 
