@@ -162,19 +162,25 @@ Werkzeug, which calls the application without running a server. Create a user:
    >>> response.status_code
    201
    >>> user = response.json
-   >>> user["displayName"], user["active"], "password" in user
-   ('Barbara Jensen', True, False)
+   >>> user["displayName"]
+   'Barbara Jensen'
+   >>> user["active"]
+   True
+   >>> "password" in user
+   False
 
 The response comes from the new row of the ``accounts`` table. ``displayName`` comes from the
-hybrid property, and ``active`` from the default of the ``active`` column. The password is
-stored hashed:
+hybrid property, and ``active`` from the default of the ``active`` column. The response leaves
+out the password. The ``password_hash`` column holds a salt and a scrypt digest, rather than the
+password:
 
 .. doctest::
 
    >>> import uuid
    >>> from intranet.models import Account
-   >>> session.get(Account, uuid.UUID(user["id"])).password_hash.count(":")
-   1
+   >>> account = session.get(Account, uuid.UUID(user["id"]))
+   >>> account.password_hash
+   '...:...'
 
 Create a group with this user as a member. The member links to the user, with its URL:
 
@@ -222,7 +228,8 @@ of :doc:`scim2-client <scim2_client:index>` calls the application directly, with
 
    $ pip install scim2-tester
 
-Run the checks:
+Run the checks. The last line lists the title of each check that runs and does not succeed. The
+list is empty when the server passes every check:
 
 .. doctest::
 
