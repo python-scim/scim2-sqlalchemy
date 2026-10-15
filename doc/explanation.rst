@@ -34,8 +34,9 @@ Filters keep the meaning of SCIM
 The storage turns a SCIM filter into a SQL condition, so that the database returns the matching
 rows only, and counts them for ``totalResults``. Filtering in Python after the query would make
 the total and the pages wrong. The condition gives the result that
-:meth:`ScimFilter.match <scim2_models.ScimFilter.match>` gives on the same resources, which
-differs from a direct translation in several places:
+:meth:`ScimFilter.match <scim2_models.ScimFilter.match>` gives on the same resources.
+:doc:`scim2_server:explanation/search` explains where a direct translation gives another result.
+The storage handles these places as follows:
 
 - SQL compares nothing to ``NULL``: ``title != 'Boss'`` is unknown when ``title`` is ``NULL``. In
   SCIM, ``title ne "Boss"`` holds for a user without a title. The storage writes every condition
@@ -93,7 +94,8 @@ Sorting follows RFC 7644
 ------------------------
 
 :rfc:`RFC 7644 §3.4.2.3 <7644#section-3.4.2.3>` places the resources without a value last in an
-ascending sort, and first in a descending one. Databases disagree on where ``NULL`` goes, so the
+ascending sort, and first in a descending one. :doc:`scim2_server:explanation/search` explains
+why a bare ``ORDER BY`` does not follow these rules. Databases disagree on where ``NULL`` goes, so the
 storage states the place of ``NULL`` in every query. A multi-valued attribute sorts on its
 ``primary`` entry, or else on its first one.
 

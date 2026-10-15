@@ -1290,14 +1290,14 @@ wheels = [
 
 [[package]]
 name = "scim2-server"
-version = "0.8.0"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "scim2-models" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/99/86/1f39b73322199d9cb6a4b5e8aaaaea3c68c3838b337c1b16590fbdfe9848/scim2_server-0.8.0.tar.gz", hash = "sha256:cdfcdbd6ac072f15322558df3253ca02b0af3722a5b7506467eeb6f251b6051a", size = 56042, upload-time = "2026-10-09T21:08:40.219Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/af/a3caa1f86976a95387f2e474129ba23d30d4e7fed311c98056d303f340d0/scim2_server-0.8.1.tar.gz", hash = "sha256:1b071435671dd7ecd31a86d16de4447fb10632ec673a2dccce9a70e1350143a6", size = 57475, upload-time = "2026-10-15T15:23:22.346Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/d9/0d32c734cb5d282be58a846a3d91f8ddaea06775cc79c0cfb2364aee3bdd/scim2_server-0.8.0-py3-none-any.whl", hash = "sha256:23e3bcfd6f13a43b3f14498ba3181d4d6132f0f2512e30479f5b8a1f8e848b3e", size = 64840, upload-time = "2026-10-09T21:08:38.749Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/ce/79ae744f34b242d7728de16d8f99194b756ef2ebfdd07ff8bdd32259f40b/scim2_server-0.8.1-py3-none-any.whl", hash = "sha256:725b90ddbb7a6321a6dde4079600ae1b7603d5781ea140f356347de7efc767e3", size = 66209, upload-time = "2026-10-15T15:23:20.91Z" },
 ]
 
 [package.optional-dependencies]
@@ -1347,7 +1347,7 @@ doc = [
 [package.metadata]
 requires-dist = [
     { name = "scim2-models", specifier = ">=0.12.2" },
-    { name = "scim2-server", specifier = ">=0.8.0" },
+    { name = "scim2-server", specifier = ">=0.8.1" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'asyncio'", specifier = ">=2.0.41" },
 ]
@@ -1363,7 +1363,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-postgresql", specifier = ">=9.1.0" },
     { name = "scim2-client", specifier = ">=0.12.0" },
-    { name = "scim2-server", extras = ["testing"], specifier = ">=0.8.0" },
+    { name = "scim2-server", extras = ["testing"], specifier = ">=0.8.1" },
     { name = "scim2-tester", specifier = ">=0.5.2" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.41" },
     { name = "tox-uv", specifier = ">=1.36.0" },

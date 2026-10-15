@@ -40,68 +40,20 @@ USERS = [
 ]
 
 FILTERS = [
-    'userName eq "ALICE"',
-    'userName ne "alice"',
-    'userName sw "dave_"',
-    'userName ew "_%"',
-    'userName co "a"',
-    'userName gt "b"',
-    'userName le "carol"',
-    'title eq "boss"',
-    'title ne "Boss"',
-    'not (title eq "Boss")',
-    "title eq null",
-    "title ne null",
-    "title gt null",
-    "title pr",
-    'title co "%"',
-    'title lt "c"',
-    "displayName pr",
-    "name pr",
-    "name.givenName pr",
-    'name.familyName eq "SMITH"',
-    "active eq true",
-    "active eq false",
-    "not (active eq true)",
-    "active ne true",
-    'meta.created co "20"',
-    "active pr",
-    "emails pr",
-    'emails eq "alice@work.example"',
-    'emails ne "alice@work.example"',
-    'emails co "WORK"',
-    'emails.type eq "work"',
-    "emails.type pr",
-    "emails.primary eq true",
-    'emails[type eq "work" and value co "alice"]',
-    'emails[type eq "home" and primary eq true]',
-    'emails[value ne "alice@work.example"]',
-    'emails[not (type eq "work")]',
-    "emails[type pr]",
-    'meta.created gt "2000-01-01T00:00:00Z"',
-    'meta.lastModified lt "2000-01-01T00:00:00Z"',
-    f'{ENTERPRISE}:employeeNumber eq "100"',
-    f'{ENTERPRISE}:employeeNumber gt "10"',
-    'title eq "Boss" or userName eq "Bob"',
-    'title eq "Boss" and active eq false',
     'nonexistent eq "x"',
     "nonexistent pr",
     'nonexistent[value eq "x"]',
 ]
+"""Filters on attributes the resource type does not declare, which a search
+request bound to no model lets through. The filters of a bound request are
+checked by the storage contract of scim2-server."""
 
 SORTS = [
-    "userName",
-    "title",
-    "displayName",
-    "name.familyName",
-    "active",
-    "emails",
-    "emails.type",
-    "meta.created",
-    f"{ENTERPRISE}:employeeNumber",
     "nonexistent",
     "password",
 ]
+"""Sorts a bound search request refuses, and a request bound to no model lets
+through."""
 
 
 @pytest.fixture
