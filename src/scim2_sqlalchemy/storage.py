@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 from typing import Any
 
 from scim2_models import InvalidValueException
@@ -26,7 +27,6 @@ from scim2_server.storage import ScimStorage
 from scim2_server.storage import SearchPage
 from sqlalchemy import Select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -50,6 +50,9 @@ from .query import _root_statements
 from .query import _search_statements
 from .query import _taken_statement
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 
 def _utcnow() -> datetime.datetime:
     """Return the current time, in UTC."""
@@ -57,7 +60,7 @@ def _utcnow() -> datetime.datetime:
 
 
 def _expire(
-    session: Session | AsyncSession, mapping: ResourceMapping, resource_id: str | None
+    session: "Session | AsyncSession", mapping: ResourceMapping, resource_id: str | None
 ) -> None:
     """Expire the record of an identifier when the session holds it, so that loading it reads the database again.
 
@@ -612,7 +615,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     def __init__(
         self,
         mappings: Mapping[str, ResourceMapping],
-        session: Callable[[], AsyncSession],
+        session: Callable[[], "AsyncSession"],
         provider: ScimProvider | None = None,
     ) -> None:
         super().__init__(mappings, provider)
@@ -753,7 +756,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
             if await session.scalar(statement) is not None:
                 raise UniquenessException
 
-    async def _ready_comparator(self, session: AsyncSession) -> _Comparator:
+    async def _ready_comparator(self, session: "AsyncSession") -> _Comparator:
         """Return how the database of the session compares strings, ready to compare them."""
         connection = await session.connection()
         comparator = self._comparator(connection.dialect.name)

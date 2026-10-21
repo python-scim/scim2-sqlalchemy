@@ -8,6 +8,10 @@ Changed
 ^^^^^^^
 - Requires scim2-server 0.8.1.
 
+Fixed
+^^^^^
+- The package imports without the ``asyncio`` extra.
+
 [0.1.0] - 2026-10-11
 --------------------
 
