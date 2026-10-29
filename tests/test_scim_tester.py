@@ -6,8 +6,7 @@ https://github.com/python-scim/scim2-tester
 import pytest
 from scim2_client.engines.wsgi import WSGISCIMClient
 from scim2_server.applications.wsgi import WSGIApplication
-from scim2_tester import Status
-from scim2_tester import check_server
+from scim2_tester.testing import ScimServerContract
 from werkzeug.test import Client
 
 GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
@@ -22,16 +21,8 @@ def scim_client(sync_storage_factory, restricted_provider):
     )
 
 
-def test_the_server_passes_scim2_tester(scim_client):
-    """A server publishing the schemas of the mappings passes every check it announces."""
-    results = check_server(scim_client)
-
-    failures = [
-        (result.title, result.reason)
-        for result in results
-        if result.status not in (Status.SKIPPED, Status.SUCCESS)
-    ]
-    assert failures == []
+class TestServer(ScimServerContract):
+    """A server publishing the schemas of the mappings passes the checks of scim2-tester."""
 
 
 def test_a_patch_adding_a_member_without_value_is_refused(
