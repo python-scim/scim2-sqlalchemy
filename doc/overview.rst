@@ -241,6 +241,33 @@ list is empty when the server passes every check:
    >>> [result.title for result in results if result.status not in (Status.SUCCESS, Status.SKIPPED)]
    []
 
+In the tests of the application, :class:`~scim2_tester.testing.ScimServerContract` runs the
+same checks as a pytest test, with a subtest per result. It needs the ``testing`` extra:
+
+.. code-block:: console
+
+   $ pip install scim2-tester[testing]
+
+Subclass it, and give it a ``scim_client`` fixture:
+
+.. code-block:: python
+
+   import pytest
+   from scim2_client.engines.wsgi import WSGISCIMClient
+   from scim2_server.applications.wsgi import WSGIApplication
+   from scim2_tester.testing import ScimServerContract
+
+   from intranet.scim import create_provider
+   from intranet.scim import create_storage
+
+
+   class TestScimServer(ScimServerContract):
+       @pytest.fixture
+       def scim_client(self, session):
+           provider = create_provider()
+           app = WSGIApplication(create_storage(session, provider), provider)
+           return WSGISCIMClient(app, base_url="http://localhost/v2", provider=provider)
+
 Close the session and the engine when the application stops:
 
 .. doctest::
