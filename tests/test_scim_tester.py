@@ -15,7 +15,9 @@ GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
 @pytest.fixture
 def scim_client(sync_storage_factory, restricted_provider):
     storage = sync_storage_factory(provider=restricted_provider)
-    application = WSGIApplication(storage, restricted_provider)
+    application = WSGIApplication(
+        storage, restricted_provider, propagate_exceptions=True
+    )
     return WSGISCIMClient(
         application, base_url="http://localhost/v2", provider=restricted_provider
     )

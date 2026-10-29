@@ -248,7 +248,8 @@ same checks as a pytest test, with a subtest per result. It needs the ``testing`
 
    $ pip install scim2-tester[testing]
 
-Subclass it, and give it a ``scim_client`` fixture:
+Subclass it, and give it a ``scim_client`` fixture. With ``propagate_exceptions``, a bug in the
+storage raises its exception, and the test shows its traceback instead of a 500 response:
 
 .. code-block:: python
 
@@ -265,7 +266,8 @@ Subclass it, and give it a ``scim_client`` fixture:
        @pytest.fixture
        def scim_client(self, session):
            provider = create_provider()
-           app = WSGIApplication(create_storage(session, provider), provider)
+           storage = create_storage(session, provider)
+           app = WSGIApplication(storage, provider, propagate_exceptions=True)
            return WSGISCIMClient(app, base_url="http://localhost/v2", provider=provider)
 
 Close the session and the engine when the application stops:
