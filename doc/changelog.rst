@@ -1,7 +1,19 @@
 Changelog
 =========
 
-[0.1.1] - 2026-20-21
+[0.1.2] - 2026-11-19
+--------------------
+
+Fixed
+^^^^^
+- Per :rfc:`7643#section-2.1`, paths in a :class:`~scim2_sqlalchemy.ResourceMapping` are case
+  insensitive. Two paths to the same attribute are refused, and so are an attribute and one of its
+  sub-attributes.
+- A single-valued attribute is refused when it is mapped to several
+  :class:`~scim2_sqlalchemy.Link`.
+- A storage refused for a missing mapping no longer leaves its mappings partly bound.
+
+[0.1.1] - 2026-10-21
 --------------------
 
 Changed
@@ -11,12 +23,6 @@ Changed
 Fixed
 ^^^^^
 - The package imports without the ``asyncio`` extra.
-- Per :rfc:`7643#section-2.1`, paths in a :class:`~scim2_sqlalchemy.ResourceMapping` are case
-  insensitive. Two paths to the same attribute are refused, and so are an attribute and one of its
-  sub-attributes.
-- A single-valued attribute is refused when it is mapped to several
-  :class:`~scim2_sqlalchemy.Link`.
-- A storage refused for a missing mapping no longer leaves its mappings partly bound.
 
 [0.1.0] - 2026-10-11
 --------------------
