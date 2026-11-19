@@ -156,8 +156,9 @@ class _StorageBase:
             str(resource_type.name): str(resource_type.endpoint).strip("/")
             for resource_type in (provider.resource_types if provider else ())
         }
-        for mapping in self.mappings.values():
-            mapping._bind(self.mappings)
+        links = [mapping._targets(self.mappings) for mapping in self.mappings.values()]
+        for mapping, targets in zip(self.mappings.values(), links, strict=True):
+            mapping._bind(targets)
 
     def _mapping(self, resource_type: ResourceType) -> ResourceMapping:
         """Return the mapping of a resource type."""

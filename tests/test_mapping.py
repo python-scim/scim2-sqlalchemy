@@ -100,6 +100,57 @@ def test_an_unknown_path_is_refused():
         person_mapping(usrName=Person.user_name)
 
 
+@pytest.mark.parametrize(
+    "path", ["ID", "urn:ietf:params:scim:schemas:core:2.0:User:id"]
+)
+def test_a_path_is_case_insensitive_and_may_be_a_urn(path):
+    """Per RFC 7643 §2.1, attribute names are case insensitive."""
+    attributes = {key: value for key, value in REQUIRED.items() if key != "id"}
+    mapping = ResourceMapping(
+        User, Person, {path: Person.id, **attributes}, version=Person.version
+    )
+
+    assert mapping._column("id").key == "id"
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"username": UserRecord.title}, "'userName' and 'username'"),
+        (
+            {"urn:ietf:params:scim:schemas:core:2.0:User:title": UserRecord.title},
+            "'title' and 'urn:ietf:params:scim:schemas:core:2.0:User:title'",
+        ),
+        (
+            {"Emails": Many(UserRecord.emails, {"value": EmailRecord.value})},
+            "'emails' and 'Emails'",
+        ),
+        (
+            {
+                "emails": Many(
+                    UserRecord.emails,
+                    {"value": EmailRecord.value, "Value": EmailRecord.type},
+                )
+            },
+            "'emails.value' and 'emails.Value'",
+        ),
+        (
+            {f"{ENTERPRISE}:manager.value": UserRecord.manager_id},
+            f"'{ENTERPRISE}:manager' and '{ENTERPRISE}:manager.value'",
+        ),
+        (
+            {"name": Link(UserRecord.manager, "User")},
+            "'name.givenName' and 'name'",
+        ),
+    ],
+    ids=["case", "urn", "collection", "entry", "sub-attribute", "parent"],
+)
+def test_two_paths_to_the_same_attribute_are_refused(changes, message):
+    """Two paths to one attribute would leave one of them unused."""
+    with pytest.raises(ValueError, match=f"{message} map the same attribute"):
+        users_mapping(changes)
+
+
 def test_a_complex_attribute_is_mapped_by_its_sub_attributes():
     """A column holds one value, not a whole name."""
     with pytest.raises(ValueError, match="map its sub-attributes"):
@@ -214,6 +265,21 @@ def test_a_mapping_links_to_the_same_mappings_in_every_storage():
         SqlAlchemyStorage({"User": users_mapping(), "Group": groups}, lambda: None)
 
 
+@pytest.mark.parametrize("refused", ["the first mapping", "a later mapping"])
+def test_a_storage_refused_for_a_missing_mapping_links_nothing(refused):
+    """A refused storage binds no Link, so its mappings still fit a corrected storage."""
+    users, groups = users_mapping(), groups_mapping()
+    if refused == "the first mapping":
+        mappings = {"Users": users, "Group": groups_mapping()}
+    else:
+        teams = groups_mapping({"members": Link(GroupRecord.members, "Member")})
+        mappings = {"Group": groups, "User": users_mapping(), "Team": teams}
+    with pytest.raises(ValueError, match="No mapping for the resource type"):
+        SqlAlchemyStorage(mappings, lambda: None)
+
+    SqlAlchemyStorage({"User": users, "Group": groups}, lambda: None)
+
+
 def test_the_schemas_hold_the_mapped_attributes_only():
     """An attribute the mapping does not store is not published."""
     (user, enterprise) = users_mapping().schemas()
@@ -282,6 +348,21 @@ def test_the_links_of_an_attribute_are_checked(links, message):
     """The Links of an attribute link to distinct resource types, and give a type all or none."""
     with pytest.raises(ValueError, match=message):
         groups_mapping({"members": links})
+
+
+def test_a_single_valued_attribute_is_mapped_to_one_link():
+    """The manager is one resource, so it cannot link to users and groups."""
+    with pytest.raises(
+        ValueError, match="holds one value, so it is mapped to one Link"
+    ):
+        users_mapping(
+            {
+                f"{ENTERPRISE}:manager": [
+                    Link(UserRecord.manager, "User"),
+                    Link(UserRecord.manager, "Group"),
+                ]
+            }
+        )
 
 
 def test_a_link_type_needs_a_type_sub_attribute():

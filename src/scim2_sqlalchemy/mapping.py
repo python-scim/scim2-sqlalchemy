@@ -66,6 +66,19 @@ def _holds_text(expression: Any) -> bool:
     return _python_type(expression) in (str, None)
 
 
+def _key(binding: AttributeBinding) -> tuple[type[BaseModel], str, str | None]:
+    """Return what identifies an attribute, whatever the case or the form of its path."""
+    return (binding.model, binding.field_name, binding.sub_field_name)
+
+
+def _overlap(
+    key: tuple[type[BaseModel], str, str | None],
+    other: tuple[type[BaseModel], str, str | None],
+) -> bool:
+    """Tell whether two attributes are the same, or one holds the other."""
+    return key == other or (key[:2] == other[:2] and None in (key[2], other[2]))
+
+
 class Attribute:
     """A column holding a SCIM attribute that the storage only reads, or only writes.
 
@@ -150,7 +163,8 @@ class Link:
     ``value`` is the ``id`` of the linked resource. Its display name, the
     ``display`` or ``displayName`` sub-attribute, is the ``displayName`` of the
     linked resource when its mapping has one, or else its ``userName``.
-    Writing the resource changes the links, and never creates nor deletes the
+    Without either, the links have no display name, although
+    :meth:`ResourceMapping.schemas` publishes it. Writing the resource changes the links, and never creates nor deletes the
     linked resources.
 
     A Link links to the resources of one resource type. An attribute linking
@@ -344,11 +358,20 @@ class ResourceMapping:
         self._columns: dict[tuple[type[BaseModel], str, str | None], _Column] = {}
         self._collections: dict[tuple[type[BaseModel], str], list[_Collection]] = {}
 
-        for required in self._REQUIRED:
-            if required not in attributes:
-                raise ValueError(f"The mapping of {model.__name__} needs {required!r}")
+        declared: dict[tuple[type[BaseModel], str, str | None], str] = {}
         for path, value in attributes.items():
-            self._add(path, value)
+            binding = self._resolve(path)
+            key = _key(binding)
+            for other, other_path in declared.items():
+                if _overlap(key, other):
+                    raise ValueError(
+                        f"{other_path!r} and {path!r} map the same attribute"
+                    )
+            declared[key] = path
+            self._add(path, binding, value)
+        for required in self._REQUIRED:
+            if _key(self._resolve(required)) not in declared:
+                raise ValueError(f"The mapping of {model.__name__} needs {required!r}")
 
         mapper: Mapper[Any] = inspect(record)
         columns = getattr(getattr(version, "property", None), "columns", [None])
@@ -476,10 +499,7 @@ class ResourceMapping:
 
     def _column(self, path: str) -> _Column:
         """Return the column of the attribute at a path."""
-        binding = self._resolve(path)
-        return self._columns[
-            (binding.model, binding.field_name, binding.sub_field_name)
-        ]
+        return self._columns[_key(self._resolve(path))]
 
     def _lookup(
         self, binding: AttributeBinding
@@ -493,8 +513,7 @@ class ResourceMapping:
         """
         collections = self._collections.get((binding.model, binding.field_name))
         if collections is None:
-            key = (binding.model, binding.field_name, binding.sub_field_name)
-            return [(None, self._columns.get(key))]
+            return [(None, self._columns.get(_key(binding)))]
         return [
             (collection, collection.column(binding.sub_field_name))
             for collection in collections
@@ -561,26 +580,23 @@ class ResourceMapping:
             for collection in collections
         ]
 
-    def _bind(self, mappings: Mapping[str, "ResourceMapping"]) -> None:
-        """Bind each Link to the mapping of the resources it links to.
+    def _targets(
+        self, mappings: Mapping[str, "ResourceMapping"]
+    ) -> list[tuple[_Collection, "ResourceMapping"]]:
+        """Return each Link with the mapping of the resources it links to.
 
         Several storages may share a mapping, as long as they link it to the
         same mappings.
         """
-        for collection in self._all_collections():
-            if collection.owned:
-                continue
-            target = mappings.get(collection.resource_type)  # type: ignore[arg-type]
-            if target is None:
-                raise ValueError(
-                    f"No mapping for the resource type {collection.resource_type!r}"
-                )
-            if collection.target is not None and collection.target is not target:
-                raise ValueError(
-                    f"{collection.binding.urn!r} already links to another mapping "
-                    f"of {collection.resource_type!r}: a mapping serves storages "
-                    "sharing the same mappings"
-                )
+        return [
+            (collection, self._target(collection, mappings))
+            for collection in self._all_collections()
+            if not collection.owned
+        ]
+
+    def _bind(self, links: list[tuple[_Collection, "ResourceMapping"]]) -> None:
+        """Bind each Link to the mapping :meth:`_targets` returned for it."""
+        for collection, target in links:
             collection.target = target
             collection.columns = {}
             head = collection.binding.urn
@@ -601,6 +617,23 @@ class ResourceMapping:
                     False,
                     column.textual,
                 )
+
+    def _target(
+        self, collection: _Collection, mappings: Mapping[str, "ResourceMapping"]
+    ) -> "ResourceMapping":
+        """Return the mapping a Link links to, refusing one that does not fit it."""
+        target = mappings.get(collection.resource_type)  # type: ignore[arg-type]
+        if target is None:
+            raise ValueError(
+                f"No mapping for the resource type {collection.resource_type!r}"
+            )
+        if collection.target is not None and collection.target is not target:
+            raise ValueError(
+                f"{collection.binding.urn!r} already links to another mapping "
+                f"of {collection.resource_type!r}: a mapping serves storages "
+                "sharing the same mappings"
+            )
+        return target
 
     def _display(self) -> _Column | None:
         """Return the column a link to these resources displays."""
@@ -624,9 +657,8 @@ class ResourceMapping:
             raise ValueError(f"{path!r} is not an attribute of {self.model.__name__}")
         return binding
 
-    def _add(self, path: str, value: Any) -> None:
+    def _add(self, path: str, binding: AttributeBinding, value: Any) -> None:
         """Check the mapping of the attribute at a path, and keep its column or its collections."""
-        binding = self._resolve(path)
         target = binding.target_type
         is_complex = isclass(target) and issubclass(target, BaseModel)
 
@@ -649,9 +681,7 @@ class ResourceMapping:
                 f"{path!r} holds several values or sub-attributes: map it with Many "
                 "or Link, or map its sub-attributes"
             )
-        self._columns[(binding.model, binding.field_name, binding.sub_field_name)] = (
-            self._build_column(path, binding, value)
-        )
+        self._columns[_key(binding)] = self._build_column(path, binding, value)
 
     def _collection(
         self, path: str, binding: AttributeBinding, relationship: Any
@@ -690,8 +720,15 @@ class ResourceMapping:
                 path, binding, many.attributes
             )
             return collection
+        declared: dict[str | None, str] = {}
         for sub_path, expression in many.attributes.items():
             sub_binding = self._resolve(f"{path}.{sub_path}")
+            if sub_binding.sub_field_name in declared:
+                raise ValueError(
+                    f"'{path}.{declared[sub_binding.sub_field_name]}' and "
+                    f"'{path}.{sub_path}' map the same attribute"
+                )
+            declared[sub_binding.sub_field_name] = sub_path
             collection.columns[sub_binding.sub_field_name] = self._build_column(
                 f"{path}.{sub_path}", sub_binding, expression
             )
@@ -710,6 +747,8 @@ class ResourceMapping:
             raise ValueError(
                 f"{path!r} needs one Link per resource type, and at least one"
             )
+        if not binding.is_multivalued and len(links) > 1:
+            raise ValueError(f"{path!r} holds one value, so it is mapped to one Link")
         typed = {link.type is not None for link in links}
         if len(typed) > 1:
             raise ValueError(f"Either every Link of {path!r} has a type, or none")
