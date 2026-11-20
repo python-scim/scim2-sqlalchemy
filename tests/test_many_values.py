@@ -227,6 +227,16 @@ def test_write_only_values_are_never_read(factory, user_type):
         user_names(storage, user_type, sort_by=f"{TAGGED}:tags")
 
 
+def test_write_only_values_are_kept_when_the_user_holds_none(factory, user_type):
+    """A client never sees the tags, so a user it sends back without them keeps them."""
+    storage = factory(tagged_mapping(tags=Attribute(Tag.value, readable=False)))
+    user = storage.create(user_type, tagged("a", ["red"]))
+
+    storage.update(user_type, user)
+
+    assert factory().get(user_type, user.id)[Tagged].tags == ["red"]
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [

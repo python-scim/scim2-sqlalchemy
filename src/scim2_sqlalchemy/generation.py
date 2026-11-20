@@ -206,6 +206,10 @@ class _Generator:
                         if (
                             not sub.multi_valued
                             and sub.mutability != Mutability.read_only
+                            and not (
+                                attribute.multi_valued
+                                and sub.mutability == Mutability.write_only
+                            )
                             and self._ask_column(model, sub_urn, sub)
                         ):
                             clear.append(sub_urn)

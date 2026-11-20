@@ -39,6 +39,21 @@ class Opaque(UserDefinedType[str]):
     cache_ok = True
 
 
+class Label(str):
+    """A string of its own kind."""
+
+
+class LabelType(UserDefinedType[str]):
+    """A column type holding Label strings."""
+
+    cache_ok = True
+
+    @property
+    def python_type(self) -> type:
+        """Tell the Python type of the values."""
+        return Label
+
+
 class Unknown(UserDefinedType[str]):
     """A column type refusing to tell its Python type, as SQLAlchemy 2.0 types do."""
 
@@ -62,6 +77,7 @@ class Person(Base):
     emails: Mapped[list["Address"]] = relationship()
     opaque: Mapped[str] = mapped_column(Opaque())
     unknown: Mapped[str] = mapped_column(Unknown())
+    label: Mapped[str] = mapped_column(LabelType())
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -149,6 +165,55 @@ def test_two_paths_to_the_same_attribute_are_refused(changes, message):
     """Two paths to one attribute would leave one of them unused."""
     with pytest.raises(ValueError, match=f"{message} map the same attribute"):
         users_mapping(changes)
+
+
+@pytest.mark.parametrize(
+    "emails, message",
+    [
+        (
+            {
+                "value": EmailRecord.value,
+                "type": Attribute(EmailRecord.type, readable=False),
+            },
+            "all readable or none",
+        ),
+        (
+            {
+                "value": EmailRecord.value,
+                "display": Attribute(EmailRecord.value, writable=False),
+            },
+            "all written or all read-only",
+        ),
+    ],
+    ids=["write-only", "read-only"],
+)
+def test_the_entries_of_a_many_are_read_and_written_alike(emails, message):
+    """Writing the emails replaces them, which would lose a value the client never sends."""
+    with pytest.raises(
+        ValueError, match=f"Writing 'emails' replaces its entries, so .* {message}"
+    ):
+        users_mapping({"emails": Many(UserRecord.emails, emails)})
+
+
+@pytest.mark.parametrize(
+    "changes, path",
+    [
+        ({"nickName": UserRecord.version}, "nickName"),
+        ({"externalId": UserRecord.manager_id}, "externalId"),
+    ],
+    ids=["integer", "uuid"],
+)
+def test_a_string_is_not_mapped_to_a_column_of_another_type(changes, path):
+    """Reading the user would fail on a value that is not a string."""
+    with pytest.raises(ValueError, match=f"'{path}' holds strings, but its column"):
+        users_mapping(changes)
+
+
+def test_a_string_is_mapped_to_a_column_of_a_kind_of_string():
+    """A column type may hold a subclass of str."""
+    mapping = person_mapping(nickName=Person.label)
+
+    assert mapping._column("nickName").key == "label"
 
 
 def test_a_complex_attribute_is_mapped_by_its_sub_attributes():

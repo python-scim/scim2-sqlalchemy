@@ -64,6 +64,10 @@ Otherwise, :func:`~scim2_sqlalchemy.generate_mappings` raises a :class:`ValueErr
 application checks a password against the stored hash with the same hash function, so the choice
 of the algorithm belongs to the application.
 
+A write-only sub-attribute of a multi-valued attribute gets no column, and ``store`` is not
+asked about it. Writing the resource replaces the entries, and a request never carries this
+value back, so it would be lost.
+
 A server loading its schemas at run time does not know their URNs in advance. It can decide on
 the annotations of the attribute instead, here to hash every write-only string:
 

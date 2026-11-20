@@ -267,13 +267,13 @@ def test_a_write_only_string_is_never_stored_in_clear_text():
 
 def test_a_write_only_sub_attribute_is_never_stored_in_clear_text():
     """Store is asked about a sub-attribute by its full path."""
-    token = f"{PROJECT}:milestones.token"
+    key = f"{PROJECT}:code.key"
 
-    with pytest.raises(ValueError, match=f"'{token}' are write-only"):
+    with pytest.raises(ValueError, match=f"'{key}' are write-only"):
         generate_mappings(
             project_provider(),
             MetaData(),
-            store=lambda binding: binding.urn == token or hashing_secrets(binding),
+            store=lambda binding: binding.urn == key or hashing_secrets(binding),
         )
 
 
@@ -455,7 +455,7 @@ def project_provider(project=Project):
 
 
 def test_attributes_the_storage_cannot_hold_are_left_out():
-    """A read-only attribute, a write-only number or list, and a list in a complex attribute get no column."""
+    """A read-only attribute, a write-only number or list, a write-only entry, and a list in a complex attribute get no column."""
     metadata = MetaData()
     generate_mappings(project_provider(), metadata, store=hashing_secrets)
     projects = metadata.tables["projects"].c
@@ -463,7 +463,7 @@ def test_attributes_the_storage_cannot_hold_are_left_out():
 
     assert {"secret", "code_value", "code_key", "title"} <= set(projects.keys())
     assert not {"pin", "score", "code_lines"} & set(projects.keys())
-    assert set(milestones.keys()) == {"id", "resource_id", "label", "token"}
+    assert set(milestones.keys()) == {"id", "resource_id", "label"}
     assert isinstance(projects.budget.type, Float)
     assert isinstance(metadata.tables["projects_tags"].c.value.type, String)
     assert "projects_codes" not in metadata.tables
@@ -476,7 +476,6 @@ def test_write_only_sub_attributes_are_left_out_on_request():
     generate_mappings(project_provider(), metadata, store=without_secrets)
 
     assert "code_key" not in metadata.tables["projects"].c
-    assert "token" not in metadata.tables["projects_milestones"].c
 
 
 def test_each_write_only_string_gets_its_own_decision():

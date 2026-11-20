@@ -115,6 +115,10 @@ Keep the expression ``NULL`` when the column is ``NULL``, as ``status == "enable
 filter ``active pr`` then holds only for the accounts with a status. A request removing the
 attribute passes :data:`None` to the setter.
 
+A string attribute is read from a column of strings, or of bytes, which the storage encodes in
+base64. The mapping refuses a string attribute in a column of another type, such as an integer,
+except for ``id``. Convert such a column with a property, whose expression casts it to a string.
+
 Map an enumerated column
 ------------------------
 
@@ -220,6 +224,13 @@ column of each sub-attribute:
 The relationship needs the same cascade as for a list of values, and its ``order_by`` gives the
 order of the entries. A sort on the attribute uses the entry marked ``primary``, or else the
 first entry.
+
+Writing the resource replaces its entries, so a value the request does not carry would be lost.
+The mapping refuses a sub-attribute that is write-only or read-only while the others are not:
+the sub-attributes are all readable or all write-only, and all written or all read-only. Like a
+write-only attribute, write-only entries keep their values when a request does not carry them.
+A request carrying them replaces them all, even a PATCH ``add``, since the storage never reads
+the former ones.
 
 Link to other resources
 -----------------------

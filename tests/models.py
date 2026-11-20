@@ -6,7 +6,9 @@ from scim2_models import Group
 from scim2_models import User
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
+from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import cast
 from sqlalchemy import func
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase
@@ -56,6 +58,7 @@ class UserRecord(Base):
     status: Mapped[str | None]
     password_hash: Mapped[str | None]
     employee_number: Mapped[str | None]
+    badge_number: Mapped[int | None]
     manager_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -88,6 +91,19 @@ class UserRecord(Base):
     @classmethod
     def _active_expression(cls):
         return cls.status == "enabled"
+
+    @hybrid_property
+    def badge(self) -> str | None:
+        return None if self.badge_number is None else str(self.badge_number)
+
+    @badge.inplace.setter
+    def _badge_setter(self, value: str | None) -> None:
+        self.badge_number = None if value is None else int(value)
+
+    @badge.inplace.expression
+    @classmethod
+    def _badge_expression(cls):
+        return cast(cls.badge_number, String)
 
     @hybrid_property
     def password(self) -> str | None:
@@ -126,6 +142,7 @@ class CertificateRecord(Base):
         ForeignKey("users.id", ondelete="CASCADE")
     )
     value: Mapped[bytes]
+    type: Mapped[str] = mapped_column(default="work")
 
 
 class GroupRecord(Base):

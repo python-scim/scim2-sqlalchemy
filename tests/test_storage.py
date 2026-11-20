@@ -444,36 +444,64 @@ def test_a_link_without_display(storage_factory, user_type, group_type):
     assert group.display is None
 
 
-def test_a_read_only_entry_column_is_read_only(storage_factory, user_type):
-    """An Attribute without write function in a Many is only read."""
-    users = ResourceMapping(
-        User,
-        UserRecord,
-        {
-            "id": UserRecord.id,
-            "userName": UserRecord.user_name,
-            "emails": Many(
-                UserRecord.emails,
-                {
-                    "value": EmailRecord.value,
-                    "display": Attribute(EmailRecord.value, writable=False),
-                },
-            ),
-            "meta.created": UserRecord.created,
-            "meta.lastModified": UserRecord.last_modified,
-        },
-        version=UserRecord.version,
+def test_read_only_entries_are_kept(storage_factory, user_type):
+    """A Many whose sub-attributes are all read-only is only read: writing the user keeps its entries."""
+    user = storage_factory().create(
+        user_type, UserModel(user_name="a", emails=[{"value": "a@example.org"}])
     )
+    emails = Many(
+        UserRecord.emails, {"value": Attribute(EmailRecord.value, writable=False)}
+    )
+    users = users_mapping({"emails": emails})
     storage = storage_factory({"User": users, "Group": groups_mapping()})
-    user = storage.create(
-        user_type, User(user_name="a", emails=[{"value": "a@example.org"}])
-    )
-    assert user.emails[0].display == "a@example.org"
 
-    storage.update(user_type, user)
-    user.emails[0].display = "other"
+    storage.update(user_type, storage.get(user_type, user.id))
+
+    user = storage.get(user_type, user.id)
+    assert [email.value for email in user.emails] == ["a@example.org"]
+    user.emails[0].value = "b@example.org"
     with pytest.raises(MutabilityException):
         storage.update(user_type, user)
+
+
+def test_an_entry_without_a_value_its_column_needs_is_refused(
+    storage_factory, user_type
+):
+    """A certificate needs a value, while its type has a default."""
+    certificates = Many(
+        UserRecord.certificates,
+        {"value": CertificateRecord.value, "type": CertificateRecord.type},
+    )
+    users = users_mapping({"x509Certificates": certificates})
+    storage = storage_factory({"User": users, "Group": groups_mapping()})
+
+    with pytest.raises(
+        InvalidValueException, match="'.*:x509Certificates.value' is required"
+    ):
+        storage.create(
+            user_type,
+            UserModel(user_name="a", x509_certificates=[{"type": "work"}]),
+        )
+
+    user = storage.create(
+        user_type,
+        UserModel(user_name="b", x509_certificates=[{"value": "TUlJRA=="}]),
+    )
+    assert user.x509_certificates[0].type == "work"
+
+
+def test_a_string_is_stored_in_an_integer_column_through_a_property(
+    storage_factory, user_type
+):
+    """A property converts the badge number, and its expression casts it for filters."""
+    users = users_mapping({"nickName": UserRecord.badge})
+    storage = storage_factory({"User": users, "Group": groups_mapping()})
+
+    user = storage.create(user_type, UserModel(user_name="a", nick_name="12"))
+
+    assert storage.get(user_type, user.id).nick_name == "12"
+    _, found = search(storage, user_type, filter='nickName sw "1"')
+    assert [resource.user_name for resource in found] == ["a"]
 
 
 class TakenMeanwhile:

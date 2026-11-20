@@ -1,6 +1,30 @@
 Changelog
 =========
 
+[0.1.3] - Unreleased
+--------------------
+
+Changed
+^^^^^^^
+- A mapping that worked in 0.1.2 can now raise a :class:`ValueError`:
+
+  - the sub-attributes of a :class:`~scim2_sqlalchemy.Many` are either all readable or none, and
+    either all written or none, since writing the resource replaces the entries;
+  - a string attribute is mapped to a column of strings or of bytes, or to a property casting
+    another column, except for ``id``.
+
+- :func:`~scim2_sqlalchemy.generate_mappings` gives no column to a write-only sub-attribute of a
+  multi-valued attribute.
+
+Fixed
+^^^^^
+- Writing a resource no longer loses the values of a :class:`~scim2_sqlalchemy.Many` that the
+  request does not carry. Write-only entries keep their values when a request does not carry them,
+  and read-only entries are no longer written.
+- An entry without a value that its column needs is refused with a 400 error, rather than a 500.
+- A string attribute in a column of another type no longer fails on each read: the mapping refuses
+  it.
+
 [0.1.2] - 2026-11-19
 --------------------
 

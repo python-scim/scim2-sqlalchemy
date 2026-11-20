@@ -136,6 +136,10 @@ class Many:
     order of the entries. Without it, the order is the one the database
     returns. A sort uses the ``primary`` entry, or else the first one.
 
+    Since writing replaces the entries, their columns are either all readable
+    or none, and either all written or none. Write-only entries keep their
+    values when the resource holds none.
+
     The entries of a multi-valued simple attribute, such as a list of strings,
     are the values of one column of the child table. The storage keeps their
     order and their duplicates.
@@ -226,6 +230,18 @@ class _Column:
         return columns is None or bool(columns[0].nullable)
 
     @property
+    def required(self) -> bool:
+        """Whether a new record needs a value: the column holds no null, and has no default."""
+        columns = getattr(getattr(self.expression, "property", None), "columns", [None])
+        column = columns[0]
+        return (
+            column is not None
+            and not column.nullable
+            and column.default is None
+            and column.server_default is None
+        )
+
+    @property
     def enumeration(self) -> SqlEnum | None:
         """The type of the column when it is an Enum, which stores strings."""
         sql_type = self.expression.type
@@ -314,9 +330,14 @@ class _Collection:
         return method() if condition is None else method(condition)
 
     @property
+    def readable(self) -> bool:
+        """Whether the entries are read, which the write-only entries of a Many are not."""
+        return any(column.readable for column in self.columns.values())
+
+    @property
     def writable(self) -> bool:
         """Whether writing the resource writes these entries."""
-        if self.simple and not self.columns[None].writable:
+        if self.owned and not any(column.writable for column in self.columns.values()):
             return False
         mutability = self.binding.model.get_field_annotation(
             self.binding.field_name, Mutability
@@ -715,22 +736,33 @@ class ResourceMapping:
             raise ValueError(
                 f"The relationship of {path!r} needs the delete-orphan cascade"
             )
+        paths: dict[str | None, str] = {}
         if simple:
             collection.columns[None] = self._build_column(
                 path, binding, many.attributes
             )
-            return collection
-        declared: dict[str | None, str] = {}
-        for sub_path, expression in many.attributes.items():
+        for sub_path, expression in ({} if simple else many.attributes).items():
             sub_binding = self._resolve(f"{path}.{sub_path}")
-            if sub_binding.sub_field_name in declared:
+            if sub_binding.sub_field_name in paths:
                 raise ValueError(
-                    f"'{path}.{declared[sub_binding.sub_field_name]}' and "
+                    f"{paths[sub_binding.sub_field_name]!r} and "
                     f"'{path}.{sub_path}' map the same attribute"
                 )
-            declared[sub_binding.sub_field_name] = sub_path
+            paths[sub_binding.sub_field_name] = f"{path}.{sub_path}"
             collection.columns[sub_binding.sub_field_name] = self._build_column(
                 f"{path}.{sub_path}", sub_binding, expression
+            )
+
+        columns = collection.columns.values()
+        if len({column.readable for column in columns}) > 1:
+            raise ValueError(
+                f"Writing {path!r} replaces its entries, "
+                "so its sub-attributes are either all readable or none"
+            )
+        if len({column.writable for column in columns}) > 1:
+            raise ValueError(
+                f"Writing {path!r} replaces its entries, "
+                "so its sub-attributes are either all written or all read-only"
             )
         return collection
 
@@ -808,4 +840,18 @@ class ResourceMapping:
             isinstance(descriptor, hybrid_property) and descriptor.fset is None
         ):
             writable = False
-        return _Column(binding, expression, key, attribute.readable, writable)
+        column = _Column(binding, expression, key, attribute.readable, writable)
+        python_type = _python_type(expression)
+        if (
+            column.is_string
+            and column.enumeration is None
+            and python_type is not None
+            and not issubclass(python_type, (str, bytes))
+            and _key(binding) != _key(self._resolve("id"))
+        ):
+            raise ValueError(
+                f"{path!r} holds strings, but its column holds "
+                f"{python_type.__name__} values: map it to a property whose "
+                "expression casts the column to a string"
+            )
+        return column

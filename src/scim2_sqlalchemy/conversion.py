@@ -155,7 +155,8 @@ def _from_scim(
     """Write a resource into a record.
 
     Read-only attributes are left as they are, and so is a write-only attribute
-    the resource has no value for, since a resource never carries it back.
+    the resource has no value for, since a resource never carries it back. The
+    same goes for the entries of a Many whose columns are write-only.
     When creating the record, a missing value is not written, so that the
     column keeps its default. links holds the records each Link of the
     resource links to.
@@ -172,8 +173,10 @@ def _from_scim(
         if not collection.writable:
             continue
         if collection.owned:
-            entries = Path(collection.binding.urn).get(resource, strict=False) or []
-            value = [_write_entry(collection, entry) for entry in entries]
+            entries = Path(collection.binding.urn).get(resource, strict=False)
+            if entries is None and not collection.readable:
+                continue
+            value = [_write_entry(collection, entry) for entry in entries or []]
         elif collection.single:
             value = next(iter(links[collection]), None)
         else:
@@ -188,8 +191,6 @@ def _write_entry(collection: _Collection, entry: Any) -> Any:
         setattr(record, collection.columns[None].key, _as_stored(entry))
         return record
     for column in collection.columns.values():
-        if not column.writable:
-            continue
         value = getattr(entry, column.binding.target_field_name, None)
         if value is not None:
             setattr(record, column.key, _as_stored(value))
@@ -232,6 +233,7 @@ def _check_storable(
     raises MutabilityException. The read-only attributes of the model of the resource are skipped,
     as RFC 7644 §3.5.1 has them ignored, and so are the derived ones.
     """
+    _check_entries(mapping, resource)
     model = type(resource)
     for path in Path[model].iter_paths():  # type: ignore[valid-type]
         binding = path.resolve()
@@ -276,6 +278,20 @@ def _check_storable(
         raise InvalidValueException(
             detail=f"'{binding.urn}' is not stored by this server"
         )
+
+
+def _check_entries(mapping: ResourceMapping, resource: Resource[Any]) -> None:
+    """Refuse an entry without a value that its column needs, rather than failing in the database."""
+    for collection in mapping._all_collections():
+        if not collection.owned or collection.simple or not collection.writable:
+            continue
+        required = [column for column in collection.columns.values() if column.required]
+        for entry in _entries(collection, resource):
+            for column in required:
+                if getattr(entry, column.binding.target_field_name, None) is None:
+                    raise InvalidValueException(
+                        detail=f"'{column.binding.urn}' is required on this server"
+                    )
 
 
 def _check_enumerated(
