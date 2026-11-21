@@ -1,3 +1,4 @@
+import decimal
 import operator
 from collections.abc import Callable
 from typing import Any
@@ -22,7 +23,9 @@ from scim2_models.path import ValuePath
 from scim2_models.path import coerce_value
 from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
+from sqlalchemy import Float
 from sqlalchemy import Integer
+from sqlalchemy import Numeric
 from sqlalchemy import Select
 from sqlalchemy import and_
 from sqlalchemy import bindparam
@@ -62,6 +65,9 @@ _ORDERINGS: dict[CompareOperator, Callable[[Any, Any], Any]] = {
 
 
 _Row = TypeVarTuple("_Row")
+
+_FAMILIES: dict[type | None, type] = {float: int, decimal.Decimal: int}
+"""The Python types of sort values that a UNION puts in one column, by the type standing for them."""
 
 
 def _as_key(column: _Column, value: Any) -> Any:
@@ -514,6 +520,18 @@ def _root_statements(
     """
     conditions = [_where(mapping, search_request, comparator) for mapping in mappings]
     keys = [_sort_key(mapping, search_request, comparator) for mapping in mappings]
+    types = {_python_type(key) for key in keys if key is not None} - {None}
+    if len({_FAMILIES.get(python_type, python_type) for python_type in types}) > 1:
+        raise InvalidPathException(
+            path=str(search_request.sort_by),
+            detail=f"Cannot sort on '{search_request.sort_by}': "
+            "the resource types store it in different types",
+        )
+    if len(types) > 1:
+        # The column of the union takes the type of the first key, which
+        # would read and bind the numbers of the other keys in that type.
+        common = Numeric() if decimal.Decimal in types else Float()
+        keys = [None if key is None else cast(key, common) for key in keys]
     key_type = next((key.type for key in keys if key is not None), None)
 
     matching = union_all(

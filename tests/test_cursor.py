@@ -11,6 +11,12 @@ from scim2_models import User
 from scim2_sqlalchemy.keyset import _decode
 from scim2_sqlalchemy.keyset import _encode
 
+from .models import RANKED
+from .models import Ranked
+from .models import UserRecord
+from .models import groups_mapping
+from .models import ranked_mapping
+
 
 @pytest.fixture
 def users(storage, user_type):
@@ -198,3 +204,72 @@ def test_a_malformed_sort_value_is_an_invalid_cursor(value):
     """A sort value that no position holds raises invalidCursor."""
     with pytest.raises(InvalidCursorException):
         _decode(value)
+
+
+@pytest.fixture
+def ranked(storage_factory, user_type, group_type):
+    """Return a storage of a user ranked 1, a user without rank and a group."""
+    storage = storage_factory(
+        mappings={
+            "User": ranked_mapping(UserRecord.badge_number),
+            "Group": groups_mapping(),
+        }
+    )
+    user = User[Ranked](user_name="ranked")
+    user[Ranked] = Ranked(rank=1)
+    storage.create(user_type, user)
+    storage.create(user_type, User[Ranked](user_name="unranked"))
+    storage.create(group_type, Group(display_name="admins"))
+    return storage
+
+
+@pytest.mark.parametrize(
+    "value", [10**20, "alice", True], ids=["too large", "text", "boolean"]
+)
+@pytest.mark.parametrize("root", [False, True], ids=["one type", "root"])
+def test_a_sort_value_the_column_cannot_hold_is_an_invalid_cursor(
+    ranked, user_type, group_type, root, value
+):
+    """A sort value no column of integers holds, such as one from a former sort, is refused rather than sent to the database."""
+    position = {"d": "next", "k": value, "i": str(uuid.uuid4())}
+    resource_types = [user_type, group_type] if root else [user_type]
+    if root:
+        position["t"] = 0
+    search_request = SearchRequest(cursor="x", sort_by=f"{RANKED}:rank")
+
+    with pytest.raises(InvalidCursorException):
+        ranked.search(resource_types, search_request, position=position)
+
+
+@pytest.mark.parametrize("root", [False, True], ids=["one type", "root"])
+def test_a_sort_value_beyond_its_column_reads_the_values_past_it(
+    ranked, user_type, group_type, root
+):
+    """An integer larger than any value of the column is past them all, before the missing ones."""
+    position = {"d": "next", "k": 3_000_000_000, "i": str(uuid.uuid4())}
+    resource_types = [user_type, group_type] if root else [user_type]
+    if root:
+        position["t"] = 0
+    search_request = SearchRequest(cursor="x", sort_by=f"{RANKED}:rank")
+
+    page = ranked.search(resource_types, search_request, position=position)
+
+    names = [
+        r.user_name if r.meta.resource_type == "User" else r.display_name
+        for r in page.resources
+    ]
+    assert sorted(names) == (["admins", "unranked"] if root else ["unranked"])
+
+
+def test_cursors_page_on_a_column_converting_its_values(storage_factory, user_type):
+    """The sort values of a column type converting them are compared through it."""
+    storage = storage_factory(
+        mappings={"User": ranked_mapping(UserRecord.rank), "Group": groups_mapping()}
+    )
+    for user_name, rank in [("b", 2), ("a", 1), ("c", 3)]:
+        user = User[Ranked](user_name=user_name)
+        user[Ranked] = Ranked(rank=rank)
+        storage.create(user_type, user)
+    search_request = SearchRequest(cursor="", count=1, sort_by=f"{RANKED}:rank")
+
+    assert user_names(walk(storage, [user_type], search_request)) == ["a", "b", "c"]

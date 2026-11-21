@@ -1,4 +1,5 @@
 import datetime
+import decimal
 import uuid
 
 from scim2_models import URN
@@ -177,6 +178,8 @@ class GroupRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     external_id: Mapped[str | None]
     display_name: Mapped[str | None]
+    score: Mapped[float | None]
+    weight: Mapped[decimal.Decimal | None]
     created: Mapped[datetime.datetime]
     last_modified: Mapped[datetime.datetime]
     version: Mapped[int] = mapped_column()

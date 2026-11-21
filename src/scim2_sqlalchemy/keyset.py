@@ -7,13 +7,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from scim2_models import InvalidCursorException
+from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
+from sqlalchemy import Integer
 from sqlalchemy import and_
 from sqlalchemy import false
+from sqlalchemy import literal
 from sqlalchemy import nulls_first
 from sqlalchemy import nulls_last
 from sqlalchemy import or_
 from sqlalchemy import tuple_
+
+from .mapping import _INTEGERS
+from .mapping import _python_type
 
 _TAGGED: dict[str, tuple[type, Callable[[Any], str], Callable[[str], Any]]] = {
     "datetime": (
@@ -139,5 +145,37 @@ def _beyond(
     if anchor.key is None:
         key_after = key.is_not(None) if not ascending else false()
         return or_(key_after, and_(key.is_(None), tie_after))
-    key_after = or_(key > anchor.key, key.is_(None)) if ascending else key < anchor.key
-    return or_(key_after, and_(key == anchor.key, tie_after))
+    value = _sort_value(key, anchor.key)
+    key_after = or_(key > value, key.is_(None)) if ascending else key < value
+    return or_(key_after, and_(key == value, tie_after))
+
+
+_ACCEPTED: dict[type, tuple[type, ...]] = {
+    float: (float, int),
+    decimal.Decimal: (decimal.Decimal, int),
+}
+"""The types of the sort values a key of decimal numbers accepts."""
+
+
+def _sort_value(key: Any, value: Any) -> Any:
+    """Return the sort value of an anchor, ready to compare with the sort key.
+
+    A value of another type than the key is refused, such as a cursor given
+    before the sort attribute moved to another column. An integer is a value
+    of a key of decimal numbers, since a database may return a whole number
+    as an integer. An integer no database stores is refused too. An integer
+    compared with a key of integers is sent as a BIGINT, as filters send it.
+    """
+    python_type = _python_type(key)
+    if python_type is not None and (
+        not isinstance(value, _ACCEPTED.get(python_type, python_type))
+        or (isinstance(value, bool) and python_type is not bool)
+    ):
+        raise InvalidCursorException
+    if not isinstance(value, int) or isinstance(value, bool):
+        return value
+    if value not in _INTEGERS:
+        raise InvalidCursorException
+    if isinstance(key.type, Integer):
+        return literal(value, BigInteger)
+    return value
