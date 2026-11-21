@@ -5,8 +5,6 @@ import pytest
 from scim2_models import URN
 from scim2_models import ComplexAttribute
 from scim2_models import Extension
-from scim2_models import InvalidFilterException
-from scim2_models import InvalidPathException
 from scim2_models import Mutability
 from scim2_models import MutabilityException
 from scim2_models import SearchRequest
@@ -15,6 +13,7 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import Session
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 
@@ -61,7 +60,7 @@ class Tag(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tagged_users.id"))
-    value: Mapped[str]
+    value: Mapped[str | None]
 
 
 def tagged_mapping(tags=Tag.value, **changes):
@@ -212,29 +211,29 @@ def test_read_only_values_are_not_written(factory, user_type):
         storage.update(user_type, user)
 
 
-def test_write_only_values_are_never_read(factory, user_type):
-    """The values are never returned, and filters and sorts refuse them."""
-    storage = factory(tagged_mapping(tags=Attribute(Tag.value, readable=False)))
+def test_a_missing_value_is_left_out(factory, database_url, user_type):
+    """A list holds no missing value, so a NULL in the column is not returned."""
+    now = datetime.datetime.now(datetime.UTC)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        record = TaggedUser(
+            user_name="a",
+            created=now,
+            last_modified=now,
+            tags=[Tag(value="red"), Tag(value=None)],
+        )
+        session.add(record)
+        session.commit()
+        user_id = str(record.id)
+    engine.dispose()
 
-    user = storage.create(user_type, tagged("a", ["red"]))
-
-    assert user[Tagged] is None
-    with pytest.raises(InvalidFilterException):
-        user_names(storage, user_type, filter=f"{TAGGED}:tags pr")
-    with pytest.raises(InvalidFilterException):
-        user_names(storage, user_type, filter=f'{TAGGED}:tags[value eq "red"]')
-    with pytest.raises(InvalidPathException):
-        user_names(storage, user_type, sort_by=f"{TAGGED}:tags")
+    assert factory().get(user_type, user_id)[Tagged].tags == ["red"]
 
 
-def test_write_only_values_are_kept_when_the_user_holds_none(factory, user_type):
-    """A client never sees the tags, so a user it sends back without them keeps them."""
-    storage = factory(tagged_mapping(tags=Attribute(Tag.value, readable=False)))
-    user = storage.create(user_type, tagged("a", ["red"]))
-
-    storage.update(user_type, user)
-
-    assert factory().get(user_type, user.id)[Tagged].tags == ["red"]
+def test_write_only_values_are_refused():
+    """A PATCH adding a tag would replace the tags a client never reads back."""
+    with pytest.raises(ValueError, match="cannot hold write-only values"):
+        tagged_mapping(tags=Attribute(Tag.value, readable=False))
 
 
 @pytest.mark.parametrize(

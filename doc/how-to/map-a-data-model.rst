@@ -226,11 +226,10 @@ order of the entries. A sort on the attribute uses the entry marked ``primary``,
 first entry.
 
 Writing the resource replaces its entries, so a value the request does not carry would be lost.
-The mapping refuses a sub-attribute that is write-only or read-only while the others are not:
-the sub-attributes are all readable or all write-only, and all written or all read-only. Like a
-write-only attribute, write-only entries keep their values when a request does not carry them.
-A request carrying them replaces them all, even a PATCH ``add``, since the storage never reads
-the former ones.
+A client never sends back a write-only value, so the mapping refuses a write-only sub-attribute.
+A PATCH ``add`` would otherwise replace the entries the client never read. The mapping also
+refuses a read-only sub-attribute next to written ones: the sub-attributes are all written or
+all read-only.
 
 Link to other resources
 -----------------------

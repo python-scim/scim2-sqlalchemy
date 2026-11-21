@@ -398,6 +398,12 @@ class Milestone(ComplexAttribute):
     token: Annotated[str | None, Mutability.write_only] = None
 
 
+class Key(ComplexAttribute):
+    """Entries of a write-only attribute."""
+
+    value: str | None = None
+
+
 class Archive(ComplexAttribute):
     """Entries with no stored sub-attribute."""
 
@@ -417,6 +423,7 @@ class Project(Resource):
     code: Code | None = None
     tags: list[str] | None = None
     codes: Annotated[list[str] | None, Mutability.write_only] = None
+    keys: Annotated[list[Key] | None, Mutability.write_only] = None
     milestones: list[Milestone] | None = None
     archives: list[Archive] | None = None
     members: list[ProjectMember] | None = None
@@ -467,6 +474,7 @@ def test_attributes_the_storage_cannot_hold_are_left_out():
     assert isinstance(projects.budget.type, Float)
     assert isinstance(metadata.tables["projects_tags"].c.value.type, String)
     assert "projects_codes" not in metadata.tables
+    assert "projects_keys" not in metadata.tables
     assert "projects_archives" not in metadata.tables
 
 

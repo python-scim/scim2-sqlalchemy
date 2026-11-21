@@ -195,6 +195,12 @@ class _Generator:
                         continue
                     if attribute.mutability == Mutability.read_only:
                         continue
+                    if (
+                        attribute.multi_valued
+                        and attribute.mutability == Mutability.write_only
+                    ):
+                        self.decisions[urn] = False
+                        continue
                     if attribute.type != SchemaAttribute.Type.complex:
                         if self._ask_column(model, urn, attribute):
                             clear.append(urn)
@@ -564,8 +570,6 @@ class _Generator:
         urn: str,
     ) -> None:
         """Add the child table of a multi-valued simple attribute, with a value column."""
-        if attribute.mutability == Mutability.write_only:
-            return
         child, key = self._child(name, record_class, path, key)
         child.add(
             "value",

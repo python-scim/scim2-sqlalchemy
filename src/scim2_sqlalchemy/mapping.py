@@ -49,6 +49,14 @@ class _Storage(Enum):
     link_type = "link type"
 
 
+def _write_only(binding: AttributeBinding) -> bool:
+    """Whether the schema makes an attribute write-only, itself or through its parent."""
+    return Mutability.write_only in (
+        binding.model.get_field_annotation(binding.field_name, Mutability),
+        binding.get_annotation(Mutability),
+    )
+
+
 def _python_type(expression: Any) -> type | None:
     """Return the Python type of the values of an expression, or None if its type tells none.
 
@@ -136,9 +144,9 @@ class Many:
     order of the entries. Without it, the order is the one the database
     returns. A sort uses the ``primary`` entry, or else the first one.
 
-    Since writing replaces the entries, their columns are either all readable
-    or none, and either all written or none. Write-only entries keep their
-    values when the resource holds none.
+    Since writing replaces the entries, their columns are all readable: a
+    client never sends back a write-only value, so a write would lose it.
+    Their columns are also either all written or none.
 
     The entries of a multi-valued simple attribute, such as a list of strings,
     are the values of one column of the child table. The storage keeps their
@@ -328,11 +336,6 @@ class _Collection:
         """Return the condition that an entry exists, and matches condition when given."""
         method = self.relationship.has if self.single else self.relationship.any
         return method() if condition is None else method(condition)
-
-    @property
-    def readable(self) -> bool:
-        """Whether the entries are read, which the write-only entries of a Many are not."""
-        return any(column.readable for column in self.columns.values())
 
     @property
     def writable(self) -> bool:
@@ -754,10 +757,12 @@ class ResourceMapping:
             )
 
         columns = collection.columns.values()
-        if len({column.readable for column in columns}) > 1:
+        if not all(
+            column.readable and not _write_only(column.binding) for column in columns
+        ):
             raise ValueError(
                 f"Writing {path!r} replaces its entries, "
-                "so its sub-attributes are either all readable or none"
+                "so they cannot hold write-only values"
             )
         if len({column.writable for column in columns}) > 1:
             raise ValueError(

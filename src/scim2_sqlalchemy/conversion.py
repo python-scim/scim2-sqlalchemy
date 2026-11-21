@@ -155,8 +155,7 @@ def _from_scim(
     """Write a resource into a record.
 
     Read-only attributes are left as they are, and so is a write-only attribute
-    the resource has no value for, since a resource never carries it back. The
-    same goes for the entries of a Many whose columns are write-only.
+    the resource has no value for, since a resource never carries it back.
     When creating the record, a missing value is not written, so that the
     column keeps its default. links holds the records each Link of the
     resource links to.
@@ -173,10 +172,10 @@ def _from_scim(
         if not collection.writable:
             continue
         if collection.owned:
-            entries = Path(collection.binding.urn).get(resource, strict=False)
-            if entries is None and not collection.readable:
-                continue
-            value = [_write_entry(collection, entry) for entry in entries or []]
+            value = [
+                _write_entry(collection, entry)
+                for entry in _entries(collection, resource)
+            ]
         elif collection.single:
             value = next(iter(links[collection]), None)
         else:

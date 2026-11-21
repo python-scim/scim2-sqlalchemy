@@ -1,7 +1,11 @@
 import datetime
+from typing import Annotated
 
 import pytest
+from scim2_models import URN
+from scim2_models import ComplexAttribute
 from scim2_models import EnterpriseUser
+from scim2_models import Extension
 from scim2_models import Group
 from scim2_models import Mutability
 from scim2_models import User
@@ -110,6 +114,41 @@ def test_a_mapping_needs_the_identifier_and_the_dates(missing):
         ResourceMapping(User, Person, attributes, version=Person.version)
 
 
+SECRET = "urn:example:params:scim:schemas:extension:secret:2.0:User"
+
+
+class Secret(ComplexAttribute):
+    value: Annotated[str | None, Mutability.write_only] = None
+
+
+class Secrets(Extension):
+    __schema__ = URN(SECRET)
+
+    secrets: list[Secret] | None = None
+    codes: Annotated[list[str] | None, Mutability.write_only] = None
+
+
+@pytest.mark.parametrize(
+    ("path", "attributes"),
+    [("secrets", {"value": EmailRecord.value}), ("codes", EmailRecord.value)],
+    ids=["sub-attribute", "attribute"],
+)
+def test_entries_the_schema_makes_write_only_are_refused(path, attributes):
+    """A client never reads them back, so a write would lose them."""
+    with pytest.raises(ValueError, match="cannot hold write-only values"):
+        ResourceMapping(
+            User[Secrets],
+            UserRecord,
+            {
+                "id": UserRecord.id,
+                "meta.created": UserRecord.created,
+                "meta.lastModified": UserRecord.last_modified,
+                f"{SECRET}:{path}": Many(UserRecord.emails, attributes),
+            },
+            version=UserRecord.version,
+        )
+
+
 def test_an_unknown_path_is_refused():
     """A typo in a path shows up when the mapping is created."""
     with pytest.raises(ValueError, match="'usrName' is not an attribute of User"):
@@ -175,7 +214,14 @@ def test_two_paths_to_the_same_attribute_are_refused(changes, message):
                 "value": EmailRecord.value,
                 "type": Attribute(EmailRecord.type, readable=False),
             },
-            "all readable or none",
+            "cannot hold write-only values",
+        ),
+        (
+            {
+                "value": Attribute(EmailRecord.value, readable=False),
+                "type": Attribute(EmailRecord.type, readable=False),
+            },
+            "cannot hold write-only values",
         ),
         (
             {
@@ -185,10 +231,10 @@ def test_two_paths_to_the_same_attribute_are_refused(changes, message):
             "all written or all read-only",
         ),
     ],
-    ids=["write-only", "read-only"],
+    ids=["write-only", "all write-only", "read-only"],
 )
 def test_the_entries_of_a_many_are_read_and_written_alike(emails, message):
-    """Writing the emails replaces them, which would lose a value the client never sends."""
+    """Writing the emails replaces them, which would lose a value the client never sends back."""
     with pytest.raises(
         ValueError, match=f"Writing 'emails' replaces its entries, so .* {message}"
     ):
