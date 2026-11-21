@@ -13,6 +13,9 @@ Changed
   - a string attribute is mapped to a column of strings or of bytes, or to a property casting
     another column, except for ``id``.
 
+- A :class:`~scim2_sqlalchemy.SqlAlchemyStorage` now raises a :class:`ValueError` when its provider
+  declares a resource type that no mapping stores.
+
 - :func:`~scim2_sqlalchemy.generate_mappings` gives no column to a write-only sub-attribute of a
   multi-valued attribute.
 

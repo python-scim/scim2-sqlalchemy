@@ -157,6 +157,11 @@ class _StorageBase:
             str(resource_type.name): str(resource_type.endpoint).strip("/")
             for resource_type in (provider.resource_types if provider else ())
         }
+        for resource_type in provider.resource_types if provider else ():
+            if resource_type.name not in self.mappings:
+                raise ValueError(
+                    f"No mapping for the resource type {resource_type.name!r}"
+                )
         links = [mapping._targets(self.mappings) for mapping in self.mappings.values()]
         for mapping, targets in zip(self.mappings.values(), links, strict=True):
             mapping._bind(targets)
@@ -416,6 +421,8 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         and gives each link a ``$ref`` relative to the SCIM root, from the
         endpoints of its resource types. Strings are compared with the
         :attr:`~scim2_models.ScimPolicy.comparison_key` of its policy.
+        Each of its resource types needs a mapping.
+    :raises ValueError: When a resource type has no mapping.
     """
 
     supports_cursors = True
@@ -631,6 +638,8 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         instances of its models, rather than of the models of the mappings.
         Strings are compared with the
         :attr:`~scim2_models.ScimPolicy.comparison_key` of its policy.
+        Each of its resource types needs a mapping.
+    :raises ValueError: When a resource type has no mapping.
     """
 
     supports_cursors = True

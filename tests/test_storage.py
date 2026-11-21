@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from scim2_sqlalchemy import Attribute
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
+from scim2_sqlalchemy import SqlAlchemyStorage
 
 from .models import ENTERPRISE
 from .models import RANKED
@@ -721,6 +722,16 @@ def test_a_boolean_stored_in_an_integer_column_is_filtered_on(
     _, found = search(storage, user_type, filter="active eq true")
 
     assert [resource.user_name for resource in found] == ["a"]
+
+
+def test_a_resource_type_without_mapping_is_refused(session, provider):
+    """A provider serving a resource type that no mapping stores is refused when the storage is built."""
+    with pytest.raises(ValueError, match="No mapping for the resource type 'Group'"):
+        SqlAlchemyStorage(
+            {"User": users_mapping({"groups": None})},
+            lambda: session,
+            provider=provider,
+        )
 
 
 def test_a_change_of_links_only_changes_the_version(storage, user_type, group_type):
