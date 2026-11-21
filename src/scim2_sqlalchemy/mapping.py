@@ -21,15 +21,23 @@ from sqlalchemy import ColumnElement
 from sqlalchemy import Dialect
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy import String
+from sqlalchemy import Uuid
 from sqlalchemy import cast
+from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import literal
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.orm import Mapper
 from sqlalchemy.orm import RelationshipProperty
 from sqlalchemy.orm import strategy_options
+from sqlalchemy.sql.compiler import SQLCompiler
+from sqlalchemy.sql.functions import FunctionElement
 from sqlalchemy.types import TypeDecorator
+
+_UUID_GROUPS = ((1, 8), (9, 4), (13, 4), (17, 4), (21, 12))
+"""The start and the length of each group of digits of a UUID, without its hyphens."""
 
 
 class _Storage(Enum):
@@ -47,6 +55,43 @@ class _Storage(Enum):
     derived = "derived"
     ref = "ref"
     link_type = "link type"
+
+
+class _UuidText(FunctionElement[str]):
+    """The text of a UUID column, in the form with hyphens that SCIM holds."""
+
+    type = String()
+    inherit_cache = True
+
+
+@compiles(_UuidText)
+def _compile_uuid_text(element: _UuidText, compiler: SQLCompiler, **kw: Any) -> str:
+    """Write the text of a UUID.
+
+    A database without a UUID type stores its 32 digits without hyphens, so
+    the hyphens are put back. A variant of the column type for the database,
+    such as a string, is written as it is.
+    """
+    (column,) = element.clauses
+    text: ColumnElement[str] = cast(column, String)
+    uuid_type = _uuid_type(column.type.dialect_impl(compiler.dialect))
+    if uuid_type is not None and not (
+        compiler.dialect.supports_native_uuid and uuid_type.native_uuid
+    ):
+        groups = [
+            func.substr(text, start, length, type_=String)
+            for start, length in _UUID_GROUPS
+        ]
+        text = groups[0]
+        for group in groups[1:]:
+            text = text + "-" + group
+    return compiler.process(text, **kw)
+
+
+def _uuid_type(sql_type: Any) -> Uuid[Any] | None:
+    """Return the Uuid type of a column, also under a TypeDecorator, or None for another type."""
+    sql_type = getattr(sql_type, "impl_instance", sql_type)
+    return sql_type if isinstance(sql_type, Uuid) else None
 
 
 def _write_only(binding: AttributeBinding) -> bool:
@@ -261,11 +306,22 @@ class _Column:
 
         An Enum column is compared as text. PostgreSQL applies no string
         function to its native enumerations, and sorts them in the order of
-        their declaration.
+        their declaration. A UUID is compared in its form with hyphens.
         """
-        if self.textual or self.enumeration is not None:
-            return cast(self.expression, String)
+        if (
+            self.textual
+            or self.enumeration is not None
+            or _uuid_type(self.expression.type) is not None
+        ):
+            return self.text
         return self.expression
+
+    @property
+    def text(self) -> ColumnElement[str]:
+        """The values as text, such as a UUID in the form with hyphens."""
+        if _uuid_type(self.expression.type) is not None:
+            return _UuidText(self.expression)
+        return cast(self.expression, String)
 
     @staticmethod
     def stored_string(enumeration: SqlEnum, member: Enum) -> str:

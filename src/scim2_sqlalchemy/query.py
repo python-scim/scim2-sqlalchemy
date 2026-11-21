@@ -22,7 +22,6 @@ from scim2_models.path import ValuePath
 from scim2_models.path import coerce_value
 from sqlalchemy import ColumnElement
 from sqlalchemy import Select
-from sqlalchemy import String
 from sqlalchemy import and_
 from sqlalchemy import cast
 from sqlalchemy import false
@@ -428,7 +427,7 @@ def _search_statements(
         select(
             mapping.record,
             (null() if key is None else key).label("key"),
-            cast(record_id, String).label("id"),
+            mapping._id.text.label("id"),
         )
         .where(condition)
         .order_by(*_keyset_order(key, [record_id], descending, forward))
@@ -477,7 +476,7 @@ def _root_statements(
     ):
         columns: list[Any] = [
             literal(position).label("position"),
-            cast(mapping._id.expression, String).label("id"),
+            mapping._id.text.label("id"),
         ]
         if key_type is not None:
             # PostgreSQL needs the type of a NULL to unite it with the keys
@@ -508,7 +507,7 @@ def _records_statement(
     """Return the statement loading the records of a page, each with its identifier as text."""
     keys = [_as_key(mapping._id, value) for value in ids]
     return (
-        select(cast(mapping._id.expression, String), mapping.record)
+        select(mapping._id.text, mapping.record)
         .where(mapping._id.expression.in_(keys))
         .options(*mapping._loader_options(mapping._returned_collections(parameters)))
     )

@@ -556,6 +556,9 @@ def test_a_deletion_the_database_refuses_raises(storage_factory, session, user_t
         ('id ne "{id}"', False),
         ('id ne "bjensen"', True),
         ('id co "{part}"', True),
+        ('id sw "{prefix}"', True),
+        ('id co "-"', True),
+        ('id co "{hex_part}"', False),
     ],
 )
 def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter, found):
@@ -563,7 +566,12 @@ def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter,
     user = storage.create(user_type, User(user_name="bjensen"))
     user_id = uuid.UUID(user.id)
     scim_filter = scim_filter.format(
-        id=user.id, hex=user_id.hex, upper=user.id.upper(), part=user.id[9:13]
+        id=user.id,
+        hex=user_id.hex,
+        upper=user.id.upper(),
+        part=user.id[9:13],
+        prefix=user.id[:9],
+        hex_part=user_id.hex[6:12],
     )
 
     total, _ = search(storage, user_type, filter=scim_filter)

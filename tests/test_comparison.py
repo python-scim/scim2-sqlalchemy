@@ -1,4 +1,5 @@
 import unicodedata
+import uuid
 import warnings
 
 import pytest
@@ -11,12 +12,17 @@ from scim2_models import UniquenessException
 from scim2_models import User
 from scim2_models import default_comparison_key
 from scim2_server.utils import load_default_service_provider_config
+from sqlalchemy import String
+from sqlalchemy import Uuid
+from sqlalchemy import literal
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.dialects import mysql
+from sqlalchemy.types import TypeDecorator
 
 from scim2_sqlalchemy.comparison import _comparator
 from scim2_sqlalchemy.comparison import _Normalizer
+from scim2_sqlalchemy.mapping import _UuidText
 from scim2_sqlalchemy.query import _search_statements
 
 from .models import GROUPS
@@ -254,3 +260,30 @@ def test_postgresql_orders_strings_by_code_point(
         storage.create(user_type, UserModel(user_name=name))
 
     assert user_names(storage, user_type, **parameters) == expected
+
+
+class WrappedUuid(TypeDecorator[uuid.UUID]):
+    """A UUID column type of an application."""
+
+    impl = Uuid
+    cache_ok = True
+
+
+@pytest.mark.parametrize(
+    "uuid_type",
+    [Uuid(), Uuid(native_uuid=False), WrappedUuid()],
+    ids=["native when the database has one", "never native", "decorated"],
+)
+def test_a_uuid_is_compared_in_its_form_with_hyphens(session, uuid_type):
+    """The database writes a UUID as its 32 digits, or with hyphens, depending on its type."""
+    value = uuid.UUID("2819c223-7f76-453a-919d-413861904646")
+
+    assert session.scalar(select(_UuidText(literal(value, uuid_type)))) == str(value)
+
+
+def test_a_uuid_stored_as_a_string_variant_keeps_its_text(session):
+    """A UUID column stored as a string on SQLite already holds its hyphens."""
+    value = "2819c223-7f76-453a-919d-413861904646"
+    uuid_type = Uuid(as_uuid=False).with_variant(String(36), "sqlite")
+
+    assert session.scalar(select(_UuidText(literal(value, uuid_type)))) == value
