@@ -429,6 +429,8 @@ class ResourceMapping:
         are required.
     :param version: The ``version_id_col`` of the mapper of ``record``, which
         gives ``meta.version`` (:ref:`sqlalchemy:mapper_version_counter`).
+        It only changes when the record changes, not when a linked record
+        does: adding a member to a group leaves the version of the user as it is.
     :raises ValueError: When a path is not valid for the model, when a
         value does not fit the attribute of its path, or when ``id`` is mapped
         to a column that can hold ``NULL``.

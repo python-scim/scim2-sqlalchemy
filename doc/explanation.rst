@@ -177,6 +177,12 @@ the one the client sent in ``If-Match``, and answers 412 when they differ. A wri
 transaction between the read and the write matches no row: SQLAlchemy raises
 :exc:`~sqlalchemy.orm.exc.StaleDataError`, which the storage turns into a 412 too.
 
+The version only follows the record of the resource. A write to another record leaves it
+unchanged, even when the resource reads that record. Adding a member to a group changes the
+version of the group, but not the version of the user, whose ``groups`` change too. Deleting a
+user does not change the version of its groups either. A client may then get a 304 for a resource
+that changed.
+
 Unique values are checked twice
 -------------------------------
 
