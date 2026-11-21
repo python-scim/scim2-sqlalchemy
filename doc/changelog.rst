@@ -26,6 +26,10 @@ Fixed
   ``id sw "2819c223-"``, compares it in its form with hyphens.
 - An identifier too large for its integer column finds nothing, rather than raising a 500 error.
   In a filter, an integer too large for its column compares as a number beyond every stored value.
+- An update only checks the unique values it changes, so a resource sharing a value with another
+  one, under the case rules of SCIM, remains writable.
+- A new resource carrying the ``id`` of another resource gets a 409 for its unique values, rather
+  than a 500 error.
 - On PostgreSQL, a filter on a boolean stored in a column of integers no longer raises a 500
   error.
 

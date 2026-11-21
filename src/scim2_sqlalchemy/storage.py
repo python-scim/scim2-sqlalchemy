@@ -33,6 +33,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from .comparison import _Comparator
 from .comparison import _comparator
 from .conversion import _check_storable
+from .conversion import _comparable
 from .conversion import _from_scim
 from .conversion import _link_entries
 from .conversion import _to_scim
@@ -249,10 +250,12 @@ class _StorageBase:
         )
 
     def _check_storable(
-        self, resource_type: ResourceType, resource: Resource[Any], record: Any
+        self,
+        resource_type: ResourceType,
+        resource: Resource[Any],
+        stored: Resource[Any] | None,
     ) -> None:
-        """Refuse a change the mapping cannot store. record is None for a new resource."""
-        stored = None if record is None else self._to_scim(resource_type, record)
+        """Refuse a change the mapping cannot store. stored is the stored resource, None for a new one."""
         _check_storable(self._mapping(resource_type), resource, stored)
 
     @staticmethod
@@ -285,16 +288,31 @@ class _StorageBase:
 
     @staticmethod
     def _unique_statements(
-        mapping: ResourceMapping, resource: Resource[Any], comparator: _Comparator
+        mapping: ResourceMapping,
+        resource: Resource[Any],
+        comparator: _Comparator,
+        stored: Resource[Any] | None,
     ) -> Iterator[Select[Any]]:
         """Yield the statements finding another record holding a unique value of the resource.
 
-        A missing value never clashes, as a SQL NULL does not.
+        A missing value never clashes, as a SQL NULL does not, and a value the
+        storage never writes, such as ``id``, is not stored. stored is the
+        resource an update changes, and None for a new one. A value it already
+        holds is not checked: another application may have stored a value that
+        clashes with it, and the record must remain writable.
         """
+        resource_id = None if stored is None else resource.id
         for column in mapping._unique_columns():
-            value = Path(column.binding.urn).get(resource, strict=False)
-            if value is not None:
-                yield _taken_statement(mapping, column, value, resource.id, comparator)
+            if not column.writable:
+                continue
+            path = Path(column.binding.urn)
+            value = path.get(resource, strict=False)
+            if value is None or (
+                stored is not None
+                and _comparable(value) == _comparable(path.get(stored, strict=False))
+            ):
+                continue
+            yield _taken_statement(mapping, column, value, resource_id, comparator)
 
     def _assign_links(
         self, found: list[tuple[_Collection, list[Any]]], entries: list[Any]
@@ -477,7 +495,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         """Store a new resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         self._check_storable(resource_type, resource, None)
-        self._check_uniqueness(mapping, resource)
+        self._check_uniqueness(mapping, resource, None)
         links = self._links(mapping, resource)
         record = self._new_record(resource_type, resource)
 
@@ -485,7 +503,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
             self.session().add(record)
             _from_scim(mapping, resource, record, links, creating=True)
 
-        self._flush(change, lambda: self._check_uniqueness(mapping, resource))
+        self._flush(change, lambda: self._check_uniqueness(mapping, resource, None))
         return self.get(resource_type, str(getattr(record, mapping._id.key)))
 
     def update(
@@ -499,12 +517,13 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         mapping = self._mapping(resource_type)
         record = self._load(resource_type, resource.id)
         self._check_version(mapping, record, expected_version)
-        self._check_storable(resource_type, resource, record)
-        self._check_uniqueness(mapping, resource)
+        stored = self._to_scim(resource_type, record)
+        self._check_storable(resource_type, resource, stored)
+        self._check_uniqueness(mapping, resource, stored)
         links = self._links(mapping, resource)
         self._flush(
             lambda: self._write_record(mapping, resource, record, links),
-            lambda: self._check_uniqueness(mapping, resource),
+            lambda: self._check_uniqueness(mapping, resource, stored),
         )
         return self.get(resource_type, resource.id)  # type: ignore[arg-type]
 
@@ -537,12 +556,15 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         return record
 
     def _check_uniqueness(
-        self, mapping: ResourceMapping, resource: Resource[Any]
+        self,
+        mapping: ResourceMapping,
+        resource: Resource[Any],
+        stored: Resource[Any] | None,
     ) -> None:
         """Refuse a resource with a unique value another resource already has."""
         session = self.session()
         comparator = self._ready_comparator(session)
-        for statement in self._unique_statements(mapping, resource, comparator):
+        for statement in self._unique_statements(mapping, resource, comparator, stored):
             if session.scalar(statement) is not None:
                 raise UniquenessException
 
@@ -683,7 +705,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         """Store a new resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         self._check_storable(resource_type, resource, None)
-        await self._check_uniqueness(mapping, resource)
+        await self._check_uniqueness(mapping, resource, None)
         links = await self._links(mapping, resource)
         record = self._new_record(resource_type, resource)
 
@@ -691,7 +713,9 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
             self.session().add(record)
             _from_scim(mapping, resource, record, links, creating=True)
 
-        await self._flush(change, lambda: self._check_uniqueness(mapping, resource))
+        await self._flush(
+            change, lambda: self._check_uniqueness(mapping, resource, None)
+        )
         return await self.get(resource_type, str(getattr(record, mapping._id.key)))
 
     async def update(
@@ -705,14 +729,17 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         mapping = self._mapping(resource_type)
         record = await self._load(resource_type, resource.id)
         self._check_version(mapping, record, expected_version)
-        self._check_storable(resource_type, resource, record)
-        await self._check_uniqueness(mapping, resource)
+        stored = self._to_scim(resource_type, record)
+        self._check_storable(resource_type, resource, stored)
+        await self._check_uniqueness(mapping, resource, stored)
         links = await self._links(mapping, resource)
 
         async def change() -> None:
             self._write_record(mapping, resource, record, links)
 
-        await self._flush(change, lambda: self._check_uniqueness(mapping, resource))
+        await self._flush(
+            change, lambda: self._check_uniqueness(mapping, resource, stored)
+        )
         return await self.get(resource_type, resource.id)  # type: ignore[arg-type]
 
     async def delete(
@@ -748,12 +775,15 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         return record
 
     async def _check_uniqueness(
-        self, mapping: ResourceMapping, resource: Resource[Any]
+        self,
+        mapping: ResourceMapping,
+        resource: Resource[Any],
+        stored: Resource[Any] | None,
     ) -> None:
         """Refuse a resource with a unique value another resource already has."""
         session = self.session()
         comparator = await self._ready_comparator(session)
-        for statement in self._unique_statements(mapping, resource, comparator):
+        for statement in self._unique_statements(mapping, resource, comparator, stored):
             if await session.scalar(statement) is not None:
                 raise UniquenessException
 

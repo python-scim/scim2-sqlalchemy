@@ -603,11 +603,11 @@ class TakenMeanwhile:
 
     checked = False
 
-    def _unique_statements(self, mapping, resource, comparator):
+    def _unique_statements(self, mapping, resource, comparator, stored):
         if not self.checked:
             self.checked = True
             return iter(())
-        return super()._unique_statements(mapping, resource, comparator)
+        return super()._unique_statements(mapping, resource, comparator, stored)
 
 
 def test_a_value_taken_meanwhile_raises_a_409(storage_factory, user_type):
@@ -671,6 +671,42 @@ def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter,
     total, _ = search(storage, user_type, filter=scim_filter)
 
     assert total == (1 if found else 0)
+
+
+def test_an_unchanged_unique_value_is_not_checked_again(
+    sync_storage_factory, session, user_type
+):
+    """Another application stored alice and Alice: Alice remains writable while she keeps her name."""
+    now = datetime.datetime.now(datetime.UTC)
+    for user_name in ("alice", "Alice"):
+        session.add(UserRecord(user_name=user_name, created=now, last_modified=now))
+    session.flush()
+    storage = sync_storage_factory()
+    _, found = search(storage, user_type)
+    (alice,) = [user for user in found if user.user_name == "Alice"]
+    alice.display_name = "Alice"
+
+    assert storage.update(user_type, alice).display_name == "Alice"
+    alice.user_name = "ALICE"
+    with pytest.raises(UniquenessException):
+        storage.update(user_type, alice)
+
+
+def test_a_new_resource_with_the_id_of_another_is_checked(storage, user_type):
+    """A new resource never is the record holding the identifier it carries."""
+    bjensen = storage.create(user_type, UserModel(user_name="bjensen"))
+
+    with pytest.raises(UniquenessException):
+        storage.create(user_type, UserModel(id=bjensen.id, user_name="bjensen"))
+
+
+def test_a_new_resource_with_the_id_of_another_gets_its_own(storage, user_type):
+    """The storage never writes the identifier a new resource carries, so it clashes with nothing."""
+    bjensen = storage.create(user_type, UserModel(user_name="bjensen"))
+
+    created = storage.create(user_type, UserModel(id=bjensen.id, user_name="other"))
+
+    assert created.id != bjensen.id
 
 
 def test_a_boolean_stored_in_an_integer_column_is_filtered_on(

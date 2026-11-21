@@ -187,6 +187,10 @@ catch. A unique constraint of the database remains the guard against two concurr
 a flush fails on a constraint, the storage searches again, and answers 409 when the value is now
 taken. Any other :exc:`~sqlalchemy.exc.IntegrityError` goes through unchanged.
 
+An update only checks the unique values it changes. Another application may have stored values
+that clash under the case rules of SCIM, such as ``alice`` and ``Alice``. Each resource then
+remains writable while it keeps its value.
+
 The application owns the transaction
 ------------------------------------
 
