@@ -11,8 +11,10 @@ from scim2_models import Mutability
 from scim2_models import User
 from sqlalchemy import ForeignKey
 from sqlalchemy import String
+from sqlalchemy import cast
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import column_property
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import UserDefinedType
@@ -73,6 +75,7 @@ class Person(Base):
     __tablename__ = "people"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    id_text: Mapped[str] = column_property(cast(id, String))
     user_name: Mapped[str]
     created: Mapped[datetime.datetime]
     last_modified: Mapped[datetime.datetime]
@@ -112,6 +115,21 @@ def test_a_mapping_needs_the_identifier_and_the_dates(missing):
 
     with pytest.raises(ValueError, match=missing):
         ResourceMapping(User, Person, attributes, version=Person.version)
+
+
+def test_an_identifier_that_can_be_missing_is_refused():
+    """A resource without id could not be read back, nor placed between two cursor pages."""
+    with pytest.raises(
+        ValueError, match="'id' is mapped to a column that can hold no value"
+    ):
+        users_mapping({"id": UserRecord.external_id, "externalId": None})
+
+
+def test_an_identifier_can_be_a_column_property():
+    """A column property over a SQL expression tells nothing of its values being missing."""
+    mapping = person_mapping(id=Person.id_text)
+
+    assert mapping._id.key == "id_text"
 
 
 SECRET = "urn:example:params:scim:schemas:extension:secret:2.0:User"

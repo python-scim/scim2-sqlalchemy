@@ -11,7 +11,8 @@ Changed
   - a :class:`~scim2_sqlalchemy.Many` cannot hold write-only values, and its sub-attributes are
     either all written or all read-only, since writing the resource replaces the entries;
   - a string attribute is mapped to a column of strings or of bytes, or to a property casting
-    another column, except for ``id``.
+    another column, except for ``id``;
+  - ``id`` is mapped to a column that cannot hold ``NULL``, or to a property.
 
 - A :class:`~scim2_sqlalchemy.SqlAlchemyStorage` now raises a :class:`ValueError` when its provider
   declares a resource type that no mapping stores.

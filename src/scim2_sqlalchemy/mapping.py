@@ -17,6 +17,7 @@ from scim2_models import Resource
 from scim2_models import ResponseParameters
 from scim2_models import Schema
 from scim2_models import Uniqueness
+from sqlalchemy import Column
 from sqlalchemy import ColumnElement
 from sqlalchemy import Dialect
 from sqlalchemy import Enum as SqlEnum
@@ -95,6 +96,13 @@ def _uuid_type(sql_type: Any) -> Uuid[Any] | None:
     """Return the Uuid type of a column, also under a TypeDecorator, or None for another type."""
     sql_type = getattr(sql_type, "impl_instance", sql_type)
     return sql_type if isinstance(sql_type, Uuid) else None
+
+
+def _table_column(expression: Any) -> Column[Any] | None:
+    """Return the table column of an expression, or None for a hybrid property or a column property over a SQL expression."""
+    columns = getattr(getattr(expression, "property", None), "columns", None)
+    column = columns[0] if columns else None
+    return column if isinstance(column, Column) else None
 
 
 def _write_only(binding: AttributeBinding) -> bool:
@@ -281,15 +289,14 @@ class _Column:
 
     @property
     def nullable(self) -> bool:
-        """Whether the column can hold no value. A hybrid property is taken as nullable."""
-        columns = getattr(getattr(self.expression, "property", None), "columns", None)
-        return columns is None or bool(columns[0].nullable)
+        """Whether the column can hold no value. A hybrid or a column property is taken as nullable."""
+        column = _table_column(self.expression)
+        return column is None or bool(column.nullable)
 
     @property
     def required(self) -> bool:
         """Whether a new record needs a value: the column holds no null, and has no default."""
-        columns = getattr(getattr(self.expression, "property", None), "columns", [None])
-        column = columns[0]
+        column = _table_column(self.expression)
         return (
             column is not None
             and not column.nullable
@@ -422,8 +429,9 @@ class ResourceMapping:
         are required.
     :param version: The ``version_id_col`` of the mapper of ``record``, which
         gives ``meta.version`` (:ref:`sqlalchemy:mapper_version_counter`).
-    :raises ValueError: When a path is not valid for the model, or when a
-        value does not fit the attribute of its path.
+    :raises ValueError: When a path is not valid for the model, when a
+        value does not fit the attribute of its path, or when ``id`` is mapped
+        to a column that can hold ``NULL``.
     """
 
     _REQUIRED = ("id", "meta.created", "meta.lastModified")
@@ -465,6 +473,12 @@ class ResourceMapping:
             )
         self._version: InstrumentedAttribute[Any] = version
         self._id = self._column("id")
+        column = _table_column(self._id.expression)
+        if column is not None and column.nullable:
+            raise ValueError(
+                "'id' is mapped to a column that can hold no value, "
+                "but each resource needs one"
+            )
         self._id.textual = not _holds_text(self._id.expression)
         self._created = self._column("meta.created")
         self._last_modified = self._column("meta.lastModified")
