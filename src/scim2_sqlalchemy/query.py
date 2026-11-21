@@ -20,9 +20,12 @@ from scim2_models.path import Not
 from scim2_models.path import Present
 from scim2_models.path import ValuePath
 from scim2_models.path import coerce_value
+from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
+from sqlalchemy import Integer
 from sqlalchemy import Select
 from sqlalchemy import and_
+from sqlalchemy import bindparam
 from sqlalchemy import cast
 from sqlalchemy import false
 from sqlalchemy import func
@@ -43,6 +46,7 @@ from .conversion import _as_stored
 from .keyset import _Anchor
 from .keyset import _beyond
 from .keyset import _keyset_order
+from .mapping import _INTEGERS
 from .mapping import ResourceMapping
 from .mapping import _Collection
 from .mapping import _Column
@@ -66,9 +70,48 @@ def _as_key(column: _Column, value: Any) -> Any:
     if python_type is None:
         return value
     try:
-        return python_type(value)
+        key = python_type(value)
     except (TypeError, ValueError):
         return None
+    if isinstance(key, int) and key not in _INTEGERS:
+        return None
+    return key
+
+
+def _bound(column: _Column, value: Any) -> Any:
+    """Return a value ready to compare with a column.
+
+    An integer is sent to a column of integers as a BIGINT. PostgreSQL would
+    otherwise cast it to the type of the column, and fail when it does not
+    fit. A column of another type, such as a TypeDecorator, gets the value as
+    it is, to convert it itself.
+    """
+    if isinstance(column.expression.type, Integer) and isinstance(value, int):
+        return literal(value, BigInteger)
+    return value
+
+
+def _among(column: _Column, keys: list[Any]) -> ColumnElement[bool]:
+    """Return the condition that a column holds one of the keys, sent as _bound sends them."""
+    if not isinstance(column.expression.type, Integer):
+        return column.expression.in_(keys)
+    return column.expression.in_(
+        bindparam("keys", keys, expanding=True, type_=BigInteger, unique=True)
+    )
+
+
+def _out_of_range(
+    expression: ColumnElement[Any], op: CompareOperator, value: int
+) -> ColumnElement[bool]:
+    """Compare an integer column with an integer no database can store."""
+    if op == CompareOperator.ne:
+        return true()
+    above = value > 0
+    if (op in (CompareOperator.gt, CompareOperator.ge) and not above) or (
+        op in (CompareOperator.lt, CompareOperator.le) and above
+    ):
+        return expression.is_not(None)
+    return false()
 
 
 def _exact_key(column: _Column, value: str) -> Any:
@@ -297,11 +340,20 @@ def _compare(
         if key is None:
             return true() if op == CompareOperator.ne else false()
         if op == CompareOperator.ne:
-            return or_(column.expression.is_(None), column.expression != key)
-        equal: ColumnElement[bool] = column.expression == key
-        return equal
+            return or_(
+                column.expression.is_(None), column.expression != _bound(column, key)
+            )
+        return and_(
+            column.expression.is_not(None), column.expression == _bound(column, key)
+        )
 
     if not column.is_string:
+        if isinstance(value, int) and _python_type(column.expression) is int:
+            if value not in _INTEGERS:
+                return _out_of_range(expression, op, value)
+            # A boolean is compared with a column of integers as 0 or 1, since
+            # PostgreSQL has no operator between an integer and a boolean.
+            value = _bound(column, int(value))
         if op == CompareOperator.ne:
             return or_(expression.is_(None), expression != value)
         if op in _SUBSTRINGS:
@@ -441,7 +493,9 @@ def _search_statements(
         value = _as_key(mapping._id, anchor.ties[0])
         if value is None:
             raise InvalidCursorException
-        page = page.where(_beyond(key, [record_id], anchor, [value], descending))
+        page = page.where(
+            _beyond(key, [record_id], anchor, [_bound(mapping._id, value)], descending)
+        )
     return count, _cursor_page(page, search_request)
 
 
@@ -508,7 +562,7 @@ def _records_statement(
     keys = [_as_key(mapping._id, value) for value in ids]
     return (
         select(mapping._id.text, mapping.record)
-        .where(mapping._id.expression.in_(keys))
+        .where(_among(mapping._id, keys))
         .options(*mapping._loader_options(mapping._returned_collections(parameters)))
     )
 
@@ -527,7 +581,7 @@ def _load_statement(
         return None
     return (
         select(mapping.record)
-        .where(mapping._id.expression == key)
+        .where(mapping._id.expression == _bound(mapping._id, key))
         .options(*mapping._loader_options(mapping._returned_collections(parameters)))
     )
 
@@ -543,7 +597,7 @@ def _taken_statement(
     condition = _compare(comparator, column, CompareOperator.eq, value)
     key = None if resource_id is None else _as_key(mapping._id, resource_id)
     if key is not None:
-        condition = and_(condition, mapping._id.expression != key)
+        condition = and_(condition, mapping._id.expression != _bound(mapping._id, key))
     return select(mapping._id.expression).where(condition).limit(1)
 
 
@@ -554,4 +608,4 @@ def _links_statement(collection: _Collection, ids: list[str]) -> Select[Any]:
     keys = [
         key for key in (_as_key(target._id, value) for value in ids) if key is not None
     ]
-    return select(target.record).where(target._id.expression.in_(keys))
+    return select(target.record).where(_among(target._id, keys))

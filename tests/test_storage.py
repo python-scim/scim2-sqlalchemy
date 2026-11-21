@@ -23,14 +23,23 @@ from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
 
 from .models import ENTERPRISE
+from .models import RANKED
 from .models import BadgeRecord
 from .models import CertificateRecord
 from .models import EmailRecord
+from .models import Ranked
 from .models import UserRecord
 from .models import groups_mapping
+from .models import ranked_mapping
 from .models import users_mapping
 
 UserModel = User[EnterpriseUser]
+
+TOO_LARGE = "99999999999999999999"
+"""An integer no database stores."""
+
+BEYOND_INTEGER = "3000000000"
+"""An integer a BIGINT holds, but not the INTEGER of PostgreSQL."""
 
 
 def search(storage, resource_type, **parameters):
@@ -355,7 +364,13 @@ def test_a_member_must_exist(storage, group_type):
 
 
 @pytest.mark.parametrize(
-    "value, expected", [("{group_id}", ["alice"]), ("not-a-number", [])]
+    "value, expected",
+    [
+        ("{group_id}", ["alice"]),
+        ("not-a-number", []),
+        (TOO_LARGE, []),
+        (BEYOND_INTEGER, []),
+    ],
 )
 def test_filter_on_an_integer_identifier(
     storage, user_type, group_type, value, expected
@@ -372,10 +387,89 @@ def test_filter_on_an_integer_identifier(
     assert [r.user_name for r in found] == expected
 
 
-def test_an_identifier_of_another_type_finds_nothing(storage, group_type):
-    """A group identifier is an integer, so a text identifier is not found."""
+@pytest.mark.parametrize("group_id", ["not-a-number", TOO_LARGE, BEYOND_INTEGER])
+def test_an_identifier_of_another_type_finds_nothing(storage, group_type, group_id):
+    """A group identifier is an integer that its column holds, so another identifier is not found."""
     with pytest.raises(NotFoundException):
-        storage.get(group_type, "not-a-number")
+        storage.get(group_type, group_id)
+
+
+@pytest.mark.parametrize("value", [TOO_LARGE, BEYOND_INTEGER])
+@pytest.mark.parametrize("scim_filter", ['id eq "{}"', 'members.value eq "{}"'])
+def test_an_integer_too_large_for_its_column_finds_nothing(
+    storage, group_type, scim_filter, value
+):
+    """An integer the identifiers cannot hold finds no resource, rather than failing in the database."""
+    storage.create(group_type, Group(display_name="admins"))
+
+    total, _ = search(storage, group_type, filter=scim_filter.format(value))
+
+    assert total == 0
+
+
+def test_a_member_too_large_for_its_column_is_unknown(storage, group_type):
+    """A group identifier no column holds links to no resource."""
+    with pytest.raises(InvalidValueException, match="unknown resource"):
+        storage.create(
+            group_type, Group(display_name="admins", members=[{"value": TOO_LARGE}])
+        )
+
+
+@pytest.mark.parametrize(
+    ("scim_filter", "expected"),
+    [
+        (f"rank eq {TOO_LARGE}", []),
+        (f"rank ne {TOO_LARGE}", ["ranked", "unranked"]),
+        (f"rank gt {TOO_LARGE}", []),
+        (f"rank ge {TOO_LARGE}", []),
+        (f"rank lt {TOO_LARGE}", ["ranked"]),
+        (f"rank le {TOO_LARGE}", ["ranked"]),
+        (f"rank gt -{TOO_LARGE}", ["ranked"]),
+        (f"rank ge -{TOO_LARGE}", ["ranked"]),
+        (f"rank lt -{TOO_LARGE}", []),
+        (f"rank le -{TOO_LARGE}", []),
+        (f"rank lt {BEYOND_INTEGER}", ["ranked"]),
+        (f"rank eq {BEYOND_INTEGER}", []),
+        (f"rank ne {BEYOND_INTEGER}", ["ranked", "unranked"]),
+    ],
+)
+def test_an_integer_too_large_for_its_column_compares_as_a_number(
+    storage_factory, user_type, scim_filter, expected
+):
+    """A number no column holds is greater or lower than any stored value."""
+    storage = ranked_storage(storage_factory, user_type, UserRecord.badge_number)
+
+    _, found = search(storage, user_type, filter=f"{RANKED}:{scim_filter}")
+
+    assert sorted(resource.user_name for resource in found) == expected
+
+
+@pytest.mark.parametrize(
+    ("scim_filter", "expected"),
+    [
+        ("rank eq 1", ["ranked"]),
+        ("rank gt 0", ["ranked"]),
+    ],
+)
+def test_an_integer_is_compared_through_the_type_of_its_column(
+    storage_factory, user_type, scim_filter, expected
+):
+    """A column type converting the values converts the compared value too."""
+    storage = ranked_storage(storage_factory, user_type, UserRecord.rank)
+
+    _, found = search(storage, user_type, filter=f"{RANKED}:{scim_filter}")
+
+    assert [resource.user_name for resource in found] == expected
+
+
+def ranked_storage(storage_factory, user_type, column):
+    """Return a storage of a user ranked 1 and of a user without rank, the rank stored in column."""
+    storage = storage_factory(mappings={"User": ranked_mapping(column)})
+    ranked = User[Ranked](user_name="ranked")
+    ranked[Ranked] = Ranked(rank=1)
+    storage.create(user_type, ranked)
+    storage.create(user_type, User[Ranked](user_name="unranked"))
+    return storage
 
 
 @pytest.mark.parametrize(
@@ -577,6 +671,20 @@ def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter,
     total, _ = search(storage, user_type, filter=scim_filter)
 
     assert total == (1 if found else 0)
+
+
+def test_a_boolean_stored_in_an_integer_column_is_filtered_on(
+    storage_factory, user_type
+):
+    """A boolean compared with a column of integers is sent as 0 or 1."""
+    users = users_mapping({"active": UserRecord.badge_number})
+    storage = storage_factory({"User": users, "Group": groups_mapping()})
+    storage.create(user_type, UserModel(user_name="a", active=True))
+    storage.create(user_type, UserModel(user_name="b", active=False))
+
+    _, found = search(storage, user_type, filter="active eq true")
+
+    assert [resource.user_name for resource in found] == ["a"]
 
 
 def test_a_change_of_links_only_changes_the_version(storage, user_type, group_type):

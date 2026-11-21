@@ -36,6 +36,9 @@ from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.functions import FunctionElement
 from sqlalchemy.types import TypeDecorator
 
+_INTEGERS = range(-(2**63), 2**63)
+"""The integers a database can store, in a BIGINT or in an SQLite INTEGER."""
+
 _UUID_GROUPS = ((1, 8), (9, 4), (13, 4), (17, 4), (21, 12))
 """The start and the length of each group of digits of a UUID, without its hyphens."""
 

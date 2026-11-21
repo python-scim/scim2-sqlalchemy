@@ -24,6 +24,10 @@ Fixed
   it.
 - A filter on a UUID the database stores without hyphens, as SQLite does, such as
   ``id sw "2819c223-"``, compares it in its form with hyphens.
+- An identifier too large for its integer column finds nothing, rather than raising a 500 error.
+  In a filter, an integer too large for its column compares as a number beyond every stored value.
+- On PostgreSQL, a filter on a boolean stored in a column of integers no longer raises a 500
+  error.
 
 [0.1.2] - 2026-11-19
 --------------------

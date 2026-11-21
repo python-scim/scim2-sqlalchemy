@@ -1,11 +1,14 @@
 import datetime
 import uuid
 
+from scim2_models import URN
 from scim2_models import EnterpriseUser
+from scim2_models import Extension
 from scim2_models import Group
 from scim2_models import User
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
+from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import cast
@@ -15,6 +18,7 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
+from sqlalchemy.types import TypeDecorator
 
 from scim2_sqlalchemy import Attribute
 from scim2_sqlalchemy import Link
@@ -23,9 +27,30 @@ from scim2_sqlalchemy import ResourceMapping
 
 ENTERPRISE = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 
+RANKED = "urn:example:params:scim:schemas:extension:ranked:2.0:User"
+
+
+class Ranked(Extension):
+    __schema__ = URN(RANKED)
+
+    rank: int | None = None
+
 
 class Base(DeclarativeBase):
     pass
+
+
+class Shifted(TypeDecorator[int]):
+    """An integer stored shifted by a thousand, as a type converting its values does."""
+
+    impl = Integer
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else value + 1000
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else value - 1000
 
 
 membership = Table(
@@ -59,6 +84,7 @@ class UserRecord(Base):
     password_hash: Mapped[str | None]
     employee_number: Mapped[str | None]
     badge_number: Mapped[int | None]
+    rank: Mapped[int | None] = mapped_column(Shifted)
     manager_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -238,3 +264,19 @@ USERS = users_mapping()
 GROUPS = groups_mapping()
 
 MAPPINGS = {"User": USERS, "Group": GROUPS}
+
+
+def ranked_mapping(column):
+    """Return a mapping of the users with an integer rank, stored in column."""
+    return ResourceMapping(
+        User[Ranked],
+        UserRecord,
+        {
+            "id": UserRecord.id,
+            "userName": UserRecord.user_name,
+            f"{RANKED}:rank": column,
+            "meta.created": UserRecord.created,
+            "meta.lastModified": UserRecord.last_modified,
+        },
+        version=UserRecord.version,
+    )
