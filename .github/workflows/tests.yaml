@@ -37,7 +37,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.13"
+          version: "0.13.7"
           python-version: ${{ matrix.python }}
           enable-cache: true
       - name: Put the PostgreSQL server of the runner in the PATH
@@ -54,7 +54,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.13"
+          version: "0.13.7"
           python-version: "3.15"
           enable-cache: true
       - name: Put the PostgreSQL server of the runner in the PATH
@@ -75,7 +75,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.13"
+          version: "0.13.7"
           python-version: "3.11"
           enable-cache: true
       - name: Install minimum dependencies
@@ -92,7 +92,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.13"
+          version: "0.13.7"
           python-version: "3.15"
           enable-cache: true
       - name: Run style checks
@@ -107,7 +107,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.13"
+          version: "0.13.7"
           python-version: "3.15"
           enable-cache: true
       - name: Install dependencies
