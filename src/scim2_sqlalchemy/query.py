@@ -21,6 +21,7 @@ from scim2_models.path import Not
 from scim2_models.path import Present
 from scim2_models.path import ValuePath
 from scim2_models.path import coerce_value
+from scim2_server.keyset import Position
 from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
 from sqlalchemy import Double
@@ -49,7 +50,6 @@ from sqlalchemy.types import TypeEngine
 from .comparison import _SUBSTRINGS
 from .comparison import _Comparator
 from .conversion import _as_stored
-from .keyset import _Anchor
 from .keyset import _beyond
 from .keyset import _keyset_order
 from .keyset import _Sorted
@@ -498,7 +498,7 @@ def _search_statements(
     mapping: ResourceMapping,
     search_request: SearchRequest[Any],
     comparator: _Comparator,
-    anchor: _Anchor | None = None,
+    anchor: Position | None = None,
 ) -> tuple[Select[int], Select[Any, Any, str]]:
     """Return the statement counting the matching records, and the one selecting a page of them.
 
@@ -529,7 +529,7 @@ def _search_statements(
     if search_request.cursor is None:
         return count, _index_page(page, search_request)
     if anchor is not None:
-        value = _as_key(mapping._id, anchor.ties[0])
+        value = _as_key(mapping._id, anchor.id)
         if value is None:
             raise InvalidCursorException
         page = page.where(
@@ -542,7 +542,7 @@ def _root_statements(
     mappings: list[ResourceMapping],
     search_request: SearchRequest[Any],
     comparator: _Comparator,
-    anchor: _Anchor | None = None,
+    anchor: Position | None = None,
 ) -> tuple[Select[int], Select[int, str, Any]]:
     """Return the statement counting the matching records of several mappings, and the one selecting a page of them.
 
@@ -598,9 +598,8 @@ def _root_statements(
     if search_request.cursor is None:
         return count, _index_page(page, search_request)
     if anchor is not None:
-        if anchor.ties[0] not in range(len(mappings)):
-            raise InvalidCursorException
-        page = page.where(_beyond(row_key, ties, anchor, anchor.ties, descending))
+        values = [anchor.type_index, anchor.id]
+        page = page.where(_beyond(row_key, ties, anchor, values, descending))
     return count, _cursor_page(page, search_request)
 
 

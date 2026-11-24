@@ -11,6 +11,9 @@ Added
 
 Changed
 ^^^^^^^
+- scim2-server 0.8.8 or later is required.
+  A cursor that holds a sort value now raises ``invalidCursor`` on a search without ``sortBy``.
+
 - A mapping that worked in 0.1.2 can now raise a :class:`ValueError`:
 
   - a :class:`~scim2_sqlalchemy.Many` cannot hold write-only values, and its sub-attributes are

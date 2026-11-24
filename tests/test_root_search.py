@@ -342,3 +342,16 @@ def test_a_whole_number_anchors_a_sort_on_decimal_numbers(storage_factory, group
     )
 
     assert names(page.resources) == ["two", "two and a half"]
+
+
+def test_an_empty_cursor_page_at_the_root_links_no_page(
+    everyone, storage, user_type, group_type
+):
+    """A cursor search at the root that matches nothing has no next or previous page."""
+    search_request = SearchRequest(cursor="", filter='userName eq "nobody"')
+
+    page = storage.search([user_type, group_type], search_request)
+
+    assert page.resources == []
+    assert page.next is None
+    assert page.previous is None
