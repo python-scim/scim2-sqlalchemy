@@ -105,6 +105,10 @@ the schemas, so the migration tool finds the same names from a run to the next:
 Pass ``prefix`` to start the name of every table with it, such as ``prefix="scim_"``, so that
 the tables of SCIM stay apart from the other tables of the database.
 
+On MariaDB, a string is stored in a ``TEXT`` column under the ``utf8mb4_nopad_bin`` collation, so
+that its unique constraint follows the code points, as the storage does. A date keeps its
+microseconds.
+
 Serve the resource types
 ------------------------
 

@@ -21,6 +21,8 @@ from scim2_sqlalchemy import Attribute
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
 
+from .models import TYPES
+
 TAGGED = "urn:example:params:scim:schemas:extension:tagged:2.0:User"
 
 
@@ -36,7 +38,7 @@ class Tagged(Extension):
 
 
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = TYPES
 
 
 class TaggedUser(Base):

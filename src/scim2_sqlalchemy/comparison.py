@@ -1,5 +1,7 @@
 import unicodedata
 import warnings
+from abc import ABC
+from abc import abstractmethod
 from collections.abc import Iterable
 from typing import Any
 
@@ -8,11 +10,16 @@ from scim2_models import ScimPolicy
 from scim2_models import default_comparison_key
 from scim2_models.path import CompareOperator
 from sqlalchemy import ColumnElement
+from sqlalchemy import Dialect
+from sqlalchemy import FunctionElement
 from sqlalchemy import String
 from sqlalchemy import func
 from sqlalchemy import literal
 from sqlalchemy import literal_column
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.compiler import SQLCompiler
 
+from .mapping import _MARIADB
 from .mapping import ResourceMapping
 from .mapping import _Column
 
@@ -25,6 +32,9 @@ _SUBSTRINGS = {
 }
 
 _KEY_FUNCTION = "scim2_key"
+
+_MARIADB_VERSION = (10, 10)
+"""The first MariaDB version with the uca1400 collations."""
 
 
 def _escape(value: str) -> str:
@@ -72,7 +82,26 @@ class _Comparator:
         return method(pattern, escape=_ESCAPE)  # type: ignore[no-any-return]
 
 
-class _Normalizer(_Comparator):
+class _Formed(_Comparator, ABC):
+    """Compare strings in a form the database computes on both sides.
+
+    The value of a filter is normalized to NFC in Python first.
+    """
+
+    @abstractmethod
+    def _form(self, column: _Column, expression: Any) -> ColumnElement[Any]:
+        """Return a string expression in the form it is compared under."""
+
+    def column(self, column: _Column) -> ColumnElement[Any]:
+        """Return a string column in the form it is compared under."""
+        return self._form(column, column.compared)
+
+    def operand(self, column: _Column, value: str) -> Any:
+        """Return a string normalized to NFC, in the form it is compared under."""
+        return self._form(column, literal(unicodedata.normalize("NFC", value)))
+
+
+class _Normalizer(_Formed):
     """Compare strings in PostgreSQL, normalized to NFC on both sides.
 
     The lower() of PostgreSQL follows the locale of the database, so the
@@ -89,13 +118,39 @@ class _Normalizer(_Comparator):
             )
         return normalized.collate("C")
 
-    def column(self, column: _Column) -> ColumnElement[Any]:
-        """Return a string column normalized to NFC."""
-        return self._form(column, column.compared)
 
-    def operand(self, column: _Column, value: str) -> Any:
-        """Return a string normalized to NFC, in Python then in the database."""
-        return self._form(column, literal(unicodedata.normalize("NFC", value)))
+class _Utf8mb4(FunctionElement[str]):
+    """A string converted to utf8mb4, the character set of the MariaDB collations."""
+
+    type = String()
+    inherit_cache = True
+
+
+@compiles(_Utf8mb4)
+def _compile_utf8mb4(element: _Utf8mb4, compiler: SQLCompiler, **kw: Any) -> str:
+    """Write the conversion of a string to utf8mb4."""
+    (expression,) = element.clauses
+    return f"CONVERT({compiler.process(expression, **kw)} USING utf8mb4)"
+
+
+class _CodePoints(_Formed):
+    """Compare strings in MariaDB by code point.
+
+    The default collations ignore the case and the accents, and the trailing
+    spaces. utf8mb4_nopad_bin compares and orders by code point, as
+    scim2-models does. lower() only knows recent letters under a uca1400
+    collation. MariaDB has no normalize(), so a stored value is compared in
+    the form it was written in.
+    """
+
+    def _form(self, column: _Column, expression: Any) -> ColumnElement[Any]:
+        """Return a string expression in utf8mb4, lowered if the column ignores the case, under a binary collation."""
+        converted: ColumnElement[Any] = _Utf8mb4(expression)
+        if column.casefolded:
+            converted = func.lower(
+                converted.collate("utf8mb4_uca1400_nopad_as_cs"), type_=String
+            )
+        return converted.collate("utf8mb4_nopad_bin")
 
 
 class _KeyFunction(_Comparator):
@@ -157,17 +212,32 @@ class _KeyFunction(_Comparator):
 
 
 def _comparator(
-    dialect: str, policy: ScimPolicy, mappings: Iterable[ResourceMapping]
+    dialect: Dialect, policy: ScimPolicy, mappings: Iterable[ResourceMapping]
 ) -> _Comparator:
-    """Return how a database compares strings, warning when it cannot follow the policy."""
-    if dialect == "sqlite":
+    """Return how a database compares strings, warning when it cannot follow the policy.
+
+    MySQL and MariaDB before 10.10 raise a ValueError.
+    """
+    if dialect.name == "sqlite":
         return _KeyFunction(policy, mappings)
+    mariadb = dialect.name in _MARIADB
+    if mariadb and not (
+        getattr(dialect, "is_mariadb", False)
+        and dialect.server_version_info is not None
+        and dialect.server_version_info >= _MARIADB_VERSION
+    ):
+        raise ValueError(
+            "The storage needs MariaDB 10.10 or later: MySQL and the older "
+            "versions of MariaDB cannot compare strings by code point"
+        )
     if policy.comparison_key is not default_comparison_key:
         warnings.warn(
-            f"The {dialect} storage cannot compare strings with the comparison key "
-            "of the policy: filters and uniqueness checks only approach it",
+            f"The {dialect.name} storage cannot compare strings with the comparison "
+            "key of the policy: filters and uniqueness checks only approach it",
             stacklevel=2,
         )
-    if dialect == "postgresql":
+    if dialect.name == "postgresql":
         return _Normalizer(policy)
+    if mariadb:
+        return _CodePoints(policy)
     return _Comparator(policy)

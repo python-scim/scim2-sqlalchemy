@@ -17,6 +17,8 @@ from sqlalchemy.orm import relationship
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
 
+from .models import TYPES
+
 
 class Color(enum.Enum):
     Red = "Crimson"
@@ -25,7 +27,7 @@ class Color(enum.Enum):
 
 
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = TYPES
 
 
 class ColoredUser(Base):

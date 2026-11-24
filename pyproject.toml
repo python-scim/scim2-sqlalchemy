@@ -58,6 +58,9 @@ dev = [
     "scim2-tester[testing]>=0.6.2",
     "tox-uv>=1.36.0",
     "werkzeug>=3.1.8",
+    "pytest-mysql>=5.0.1",
+    "pymysql>=1.2.4",
+    "asyncmy>=0.2.18",
 ]
 doc = [
     "shibuya>=2024.5.15",

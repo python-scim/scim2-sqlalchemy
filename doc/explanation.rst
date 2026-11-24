@@ -79,9 +79,18 @@ as the database allows:
   point, as scim2-models does, whatever the collation of the column. An index that serves these
   filters is an index on the same expression, with the same collation. With a comparison key other
   than the default one, the storage warns that it only approaches it.
-- Other databases lower both sides with their own ``lower()``. MySQL and MariaDB are not
-  supported: their default collations ignore the case and the accents, even for a ``caseExact``
-  attribute.
+- MariaDB compares both sides under the ``utf8mb4_nopad_bin`` collation, which orders strings by
+  code point, and keeps their trailing spaces. The default collations of MariaDB ignore the case,
+  the accents and the trailing spaces, even for a ``caseExact`` attribute. ``lower()`` runs under
+  the ``utf8mb4_uca1400_nopad_as_cs`` collation, the only one under which it lowers the recent
+  letters. It differs from Python for the same letters as PostgreSQL. MariaDB has no
+  ``normalize()``: only the value of a filter is normalized to NFC, so a stored string written in
+  another form, such as NFD, matches neither filters nor uniqueness checks. MariaDB has no index on
+  an expression either: an index that serves these filters is an index on a virtual generated
+  column, with the same expression. The storage needs MariaDB 10.10, the first version with the
+  ``uca1400`` collations, and refuses MySQL. With a comparison key other than the default one, the
+  storage warns that it only approaches it.
+- Other databases lower both sides with their own ``lower()``.
 
 Where ``LIKE`` serves the ``co``, ``sw`` and ``ew`` filters, the ``%`` and ``_`` characters of the
 value are escaped, so that they match themselves.
@@ -175,7 +184,10 @@ of its SQLAlchemy model. SQLAlchemy increments the column on every write, and ad
 read to the ``WHERE`` clause of the ``UPDATE``. The storage first compares the stored version with
 the one the client sent in ``If-Match``, and answers 412 when they differ. A write by another
 transaction between the read and the write matches no row: SQLAlchemy raises
-:exc:`~sqlalchemy.orm.exc.StaleDataError`, which the storage turns into a 412 too.
+:exc:`~sqlalchemy.orm.exc.StaleDataError`, which the storage turns into a 412 too. Under the
+default ``REPEATABLE READ`` isolation, MariaDB refuses instead to write a record changed since the
+transaction read it, and rolls back the whole transaction. The storage turns this error into a 412
+too, and the application then rolls back its session.
 
 The version only follows the record of the resource. A write to another record leaves it
 unchanged, even when the resource reads that record. Adding a member to a group changes the
@@ -190,8 +202,10 @@ Before a write, the storage searches for another record holding a unique value o
 such as its ``userName``, and answers 409 when it finds one. The search follows the case rules of
 the attribute, so ``BJensen`` clashes with ``bjensen``, which a plain unique constraint does not
 catch. A unique constraint of the database remains the guard against two concurrent writes. When
-a flush fails on a constraint, the storage searches again, and answers 409 when the value is now
-taken. Any other :exc:`~sqlalchemy.exc.IntegrityError` goes through unchanged.
+a flush fails on a unique constraint, the storage answers 409. This also holds when the constraint
+is stricter than the search: under a collation that ignores the accents, as the default ones of
+MariaDB do, ``José`` clashes with ``Jose``. Any other :exc:`~sqlalchemy.exc.IntegrityError` goes
+through unchanged.
 
 An update only checks the unique values it changes. Another application may have stored values
 that clash under the case rules of SCIM, such as ``alice`` and ``Alice``. Each resource then

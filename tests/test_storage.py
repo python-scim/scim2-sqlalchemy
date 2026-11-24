@@ -13,21 +13,27 @@ from scim2_models import PreconditionFailedException
 from scim2_models import SearchRequest
 from scim2_models import UniquenessException
 from scim2_models import User
+from sqlalchemy import create_engine
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
 from scim2_sqlalchemy import Attribute
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
 from scim2_sqlalchemy import SqlAlchemyStorage
+from scim2_sqlalchemy.storage import _translate
 
 from .models import ENTERPRISE
 from .models import RANKED
 from .models import BadgeRecord
 from .models import CertificateRecord
 from .models import EmailRecord
+from .models import GroupRecord
 from .models import Ranked
 from .models import UserRecord
 from .models import groups_mapping
@@ -600,15 +606,10 @@ def test_a_string_is_stored_in_an_integer_column_through_a_property(
 
 
 class TakenMeanwhile:
-    """Skip the first uniqueness check, as when another transaction takes the value right after it."""
-
-    checked = False
+    """Skip the uniqueness check, as when another transaction takes the value right after it."""
 
     def _unique_statements(self, mapping, resource, comparator, stored):
-        if not self.checked:
-            self.checked = True
-            return iter(())
-        return super()._unique_statements(mapping, resource, comparator, stored)
+        return iter(())
 
 
 def test_a_value_taken_meanwhile_raises_a_409(storage_factory, user_type):
@@ -624,6 +625,50 @@ def test_another_integrity_error_goes_through(storage_factory, user_type):
     """An integrity error unrelated to unique values is not a 409."""
     with pytest.raises(IntegrityError):
         storage_factory().create(user_type, UserModel())
+
+
+class DriverError(Exception):
+    """An error of a database driver, with the attributes the driver sets."""
+
+    def __init__(self, *args, **attributes):
+        super().__init__(*args)
+        self.__dict__.update(attributes)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DriverError("duplicate key", sqlstate="23505"),
+        DriverError("duplicate key", pgcode="23505"),
+        DriverError("UNIQUE failed", sqlite_errorname="SQLITE_CONSTRAINT_UNIQUE"),
+        DriverError(1062, "Duplicate entry", sqlstate="23000"),
+        DriverError("Duplicate entry", errno=1062, sqlstate="23000"),
+    ],
+    ids=["psycopg", "psycopg2", "sqlite3", "PyMySQL", "MariaDB Connector"],
+)
+def test_a_unique_value_taken_raises_a_409_whatever_the_driver(error):
+    """Each driver tells a unique value taken its own way."""
+    with pytest.raises(UniquenessException):
+        _translate(IntegrityError("INSERT", {}, error))
+
+
+def test_an_error_without_a_code_goes_through():
+    """An error the storage cannot tell apart is left to the application."""
+    _translate(IntegrityError("INSERT", {}, DriverError()))
+
+
+def test_an_earlier_error_is_not_taken_for_the_cause():
+    """An error the application was handling when it called the storage does not change the answer."""
+    earlier = IntegrityError("INSERT", {}, DriverError(sqlstate="23505"))
+    error = IntegrityError("INSERT", {}, DriverError(sqlstate="23502"))
+    error.__context__ = earlier
+
+    _translate(error)
+
+
+def test_a_savepoint_gone_on_its_own_goes_through():
+    """Only a savepoint gone after a record changed meanwhile is a 412."""
+    _translate(OperationalError("ROLLBACK", {}, DriverError(1305, "SAVEPOINT")))
 
 
 def test_a_deletion_the_database_refuses_raises(storage_factory, session, user_type):
@@ -675,9 +720,11 @@ def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter,
 
 
 def test_an_unchanged_unique_value_is_not_checked_again(
-    sync_storage_factory, session, user_type
+    sync_storage_factory, session, user_type, database_url
 ):
     """Another application stored alice and Alice: Alice remains writable while she keeps her name."""
+    if database_url.startswith("mariadb"):
+        pytest.skip("The default collation of MariaDB cannot hold alice and Alice")
     now = datetime.datetime.now(datetime.UTC)
     for user_name in ("alice", "Alice"):
         session.add(UserRecord(user_name=user_name, created=now, last_modified=now))
@@ -762,6 +809,77 @@ def test_a_version_changed_meanwhile_raises_a_412(storage_factory, user_type):
 
     with pytest.raises(PreconditionFailedException):
         storage.update(user_type, user)
+
+
+def changed_by_another_transaction(engine):
+    """Return a mixin raising the version of the record in another transaction, right before the write."""
+
+    class ChangedByAnotherTransaction:
+        def _write_record(self, mapping, resource, record, links):
+            with engine.begin() as connection:
+                connection.execute(
+                    update(UserRecord)
+                    .where(UserRecord.id == record.id)
+                    .values(version=UserRecord.version + 1)
+                )
+            super()._write_record(mapping, resource, record, links)
+
+    return ChangedByAnotherTransaction
+
+
+def test_a_version_another_transaction_changed_raises_a_412(
+    storage_factory, database_url, user_type
+):
+    """MariaDB refuses to write a record changed since the transaction read it, which is a 412 too."""
+    engine = create_engine(database_url)
+    now = datetime.datetime.now(datetime.UTC)
+    user_id = uuid.uuid4()
+    with Session(engine) as other:
+        other.add(
+            UserRecord(id=user_id, user_name="bjensen", created=now, last_modified=now)
+        )
+        other.commit()
+    storage = storage_factory(mixins=[changed_by_another_transaction(engine)])
+    user = storage.get(user_type, str(user_id))
+    user.display_name = "Barbara"
+
+    with pytest.raises(PreconditionFailedException):
+        storage.update(user_type, user)
+    engine.dispose()
+
+
+def test_an_identifier_read_as_a_string_over_integers_is_found(
+    sync_storage_factory, group_type
+):
+    """A hybrid identifier may return a string in Python over an integer column in SQL."""
+    groups = groups_mapping({"id": GroupRecord.text_id})
+    storage = sync_storage_factory(mappings={"User": users_mapping(), "Group": groups})
+    group = storage.create(group_type, Group(display_name="Admins"))
+
+    assert storage.get(group_type, group.id).display_name == "Admins"
+
+
+def test_an_identifier_is_found_by_its_exact_text(
+    sync_storage_factory, session, user_type
+):
+    """A collation ignoring the case, such as the default one of MariaDB, finds no other identifier."""
+    now = datetime.datetime.now(datetime.UTC)
+    session.add(
+        UserRecord(
+            user_name="bjensen", display_name="bjensen", created=now, last_modified=now
+        )
+    )
+    session.flush()
+    mapping = users_mapping(
+        {"id": UserRecord.user_name, "userName": UserRecord.display_name}
+    )
+    storage = sync_storage_factory(
+        mappings={"User": mapping, "Group": groups_mapping()}
+    )
+
+    assert storage.get(user_type, "bjensen").id == "bjensen"
+    with pytest.raises(NotFoundException):
+        storage.get(user_type, "BJENSEN")
 
 
 @pytest.mark.parametrize(

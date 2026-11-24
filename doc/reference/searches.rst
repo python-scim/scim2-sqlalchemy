@@ -26,7 +26,7 @@ what a search supports:
      - One, or every resource type for a search at the root of the server.
 
 A string compares in the form the comparison key of the policy gives it: exactly on SQLite, and
-approximately on PostgreSQL. :doc:`../explanation` describes each database.
+approximately on PostgreSQL and MariaDB. :doc:`../explanation` describes each database.
 
 A resource without a value sorts last when ascending, and first when descending. An attribute the
 resource type does not declare matches no resource.
