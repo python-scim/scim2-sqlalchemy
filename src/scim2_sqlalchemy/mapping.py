@@ -313,13 +313,14 @@ class _Column:
 
     @property
     def required(self) -> bool:
-        """Whether a new record needs a value: the column holds no null, and has no default."""
+        """Whether a new record needs a value: the column holds no null, has no default, and the database does not number it."""
         column = _table_column(self.expression)
         return (
             column is not None
             and not column.nullable
             and column.default is None
             and column.server_default is None
+            and column is not column.table.autoincrement_column
         )
 
     @property
@@ -595,6 +596,15 @@ class ResourceMapping:
         key = urn.lower()
         return all(
             column.nullable
+            for column in self._columns.values()
+            if column.binding.urn.lower() == key
+        )
+
+    def _required(self, urn: str) -> bool:
+        """Tell whether a new record needs a value for the column of an attribute."""
+        key = urn.lower()
+        return any(
+            column.required
             for column in self._columns.values()
             if column.binding.urn.lower() == key
         )

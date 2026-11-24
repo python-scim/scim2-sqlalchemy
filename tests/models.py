@@ -98,6 +98,8 @@ class UserRecord(Base):
     password_hash: Mapped[str | None]
     employee_number: Mapped[str | None]
     badge_number: Mapped[int | None]
+    profile_url: Mapped[str] = mapped_column(default="https://example.org/profile")
+    department: Mapped[str] = mapped_column(server_default="Sales")
     rank: Mapped[int | None] = mapped_column(Shifted)
     manager_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")

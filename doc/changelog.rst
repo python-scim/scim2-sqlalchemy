@@ -31,7 +31,8 @@ Changed
 Fixed
 ^^^^^
 - The read-only entries of a :class:`~scim2_sqlalchemy.Many` are no longer written.
-- An entry without a value that its column needs is refused with a 400 error, rather than a 500.
+- A new resource, or an entry, without a value that its column needs is refused with a 400 error,
+  rather than a 500. A column needs a value when it cannot be ``NULL`` and has no default.
 - A string attribute in a column of another type no longer fails on each read: the mapping refuses
   it.
 - A filter on a UUID the database stores without hyphens, as SQLite does, such as

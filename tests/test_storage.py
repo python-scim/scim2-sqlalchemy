@@ -621,10 +621,60 @@ def test_a_value_taken_meanwhile_raises_a_409(storage_factory, user_type):
         storage.create(user_type, UserModel(user_name="bjensen"))
 
 
+def test_a_resource_without_a_value_its_column_needs_is_refused(
+    storage_factory, user_type
+):
+    """A new user needs a userName, as its column cannot be NULL and has no default."""
+    with pytest.raises(InvalidValueException, match="userName' is required"):
+        storage_factory().create(user_type, UserModel())
+
+
+def test_a_column_with_a_default_needs_no_value(storage_factory, user_type):
+    """A column that cannot be NULL takes its default when the new resource has no value."""
+    users = users_mapping(
+        {
+            "profileUrl": UserRecord.profile_url,
+            f"{ENTERPRISE}:department": UserRecord.department,
+        }
+    )
+    storage = storage_factory({"User": users, "Group": groups_mapping()})
+
+    user = storage.create(user_type, UserModel(user_name="bjensen"))
+
+    assert user.profile_url == "https://example.org/profile"
+    assert user[EnterpriseUser].department == "Sales"
+
+
+def test_a_column_the_database_numbers_needs_no_value(
+    storage_factory, user_type, group_type
+):
+    """The database numbers an integer primary key, so a new resource needs no value for it."""
+    groups = ResourceMapping(
+        Group[Ranked],
+        GroupRecord,
+        {
+            "id": GroupRecord.id,
+            "displayName": GroupRecord.display_name,
+            f"{RANKED}:rank": GroupRecord.id,
+            "meta.created": GroupRecord.created,
+            "meta.lastModified": GroupRecord.last_modified,
+        },
+        version=GroupRecord.version,
+    )
+    storage = storage_factory({"User": users_mapping(), "Group": groups})
+
+    group = storage.create(group_type, Group[Ranked](display_name="admins"))
+
+    assert group[Ranked].rank == int(group.id)
+
+
 def test_another_integrity_error_goes_through(storage_factory, user_type):
     """An integrity error unrelated to unique values is not a 409."""
+    users = users_mapping({"userName": None})
+    storage = storage_factory({"User": users, "Group": groups_mapping()})
+
     with pytest.raises(IntegrityError):
-        storage_factory().create(user_type, UserModel())
+        storage.create(user_type, UserModel())
 
 
 class DriverError(Exception):

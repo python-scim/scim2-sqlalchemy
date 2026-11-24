@@ -20,7 +20,8 @@ into error responses:
    * - :class:`~scim2_models.InvalidValueException`
      - The resource holds a value no mapping stores, an entry of a
        :class:`~scim2_sqlalchemy.Link` without ``value``, a link to an unknown resource, or a
-       ``type`` other than the one of its :class:`~scim2_sqlalchemy.Link`.
+       ``type`` other than the one of its :class:`~scim2_sqlalchemy.Link`. A new resource has no
+       value for a column that cannot be ``NULL`` and has no default.
    * - :class:`~scim2_models.MutabilityException`
      - The resource changes an attribute the mapping only reads, or removes a value whose column
        cannot be ``NULL``.

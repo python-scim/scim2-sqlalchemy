@@ -229,8 +229,10 @@ def _check_storable(
     for a new one. A value equal to the stored one changes nothing, so a
     resource read and sent back is accepted. A missing value changes nothing
     either, except for a stored value whose column cannot hold none: removing it
-    raises MutabilityException. The read-only attributes of the model of the resource are skipped,
-    as RFC 7644 §3.5.1 has them ignored, and so are the derived ones.
+    raises MutabilityException. A new resource needs a value for each column
+    that cannot hold none and has no default. The read-only attributes of the
+    model of the resource are skipped, as RFC 7644 §3.5.1 has them ignored, and
+    so are the derived ones.
     """
     _check_entries(mapping, resource)
     model = type(resource)
@@ -253,6 +255,10 @@ def _check_storable(
             current = _comparable(Path(binding.urn).get(stored, strict=False))
         if storage == _Storage.written:
             _check_enumerated(mapping, binding, value)
+            if value is None and stored is None and mapping._required(binding.urn):
+                raise InvalidValueException(
+                    detail=f"'{binding.urn}' is required on this server"
+                )
             if (
                 value is None
                 and current is not None
