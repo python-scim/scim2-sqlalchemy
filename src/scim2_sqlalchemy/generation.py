@@ -17,7 +17,7 @@ from scim2_models import Uniqueness
 from sqlalchemy import Boolean
 from sqlalchemy import Column
 from sqlalchemy import DateTime
-from sqlalchemy import Float
+from sqlalchemy import Double
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import LargeBinary
@@ -25,11 +25,14 @@ from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import Uuid
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeEngine
 
+from .mapping import _MARIADB
+from .mapping import _MARIADB_TEXT
 from .mapping import Attribute
 from .mapping import Link
 from .mapping import Many
@@ -41,13 +44,24 @@ _MEMBERS = "urn:ietf:params:scim:schemas:core:2.0:Group:members"
 _MAX_NAME_LENGTH = 63
 """The longest identifier PostgreSQL keeps."""
 
+
+def _string() -> TypeEngine[Any]:
+    """Return the type of a string column, a TEXT on MariaDB."""
+    return String().with_variant(_MARIADB_TEXT, *_MARIADB)
+
+
+def _date_time() -> TypeEngine[Any]:
+    """Return the type of a date column, which keeps the microseconds on MariaDB too."""
+    return DateTime(timezone=True).with_variant(mysql.DATETIME(fsp=6), *_MARIADB)
+
+
 _SQL_TYPES: dict[SchemaAttribute.Type, Callable[[], TypeEngine[Any]]] = {
-    SchemaAttribute.Type.string: String,
-    SchemaAttribute.Type.reference: String,
+    SchemaAttribute.Type.string: _string,
+    SchemaAttribute.Type.reference: _string,
     SchemaAttribute.Type.boolean: Boolean,
     SchemaAttribute.Type.integer: Integer,
-    SchemaAttribute.Type.decimal: Float,
-    SchemaAttribute.Type.date_time: lambda: DateTime(timezone=True),
+    SchemaAttribute.Type.decimal: Double,
+    SchemaAttribute.Type.date_time: _date_time,
     SchemaAttribute.Type.binary: LargeBinary,
 }
 
@@ -344,15 +358,15 @@ class _Generator:
         version = mapped_column(Integer, nullable=False)
         for key, value, path in [
             ("id", mapped_column(Uuid, primary_key=True, default=uuid.uuid4), "id"),
-            ("external_id", mapped_column(String), "externalId"),
+            ("external_id", mapped_column(_string()), "externalId"),
             (
                 "meta_created",
-                mapped_column(DateTime(timezone=True), nullable=False),
+                mapped_column(_date_time(), nullable=False),
                 "meta.created",
             ),
             (
                 "meta_last_modified",
-                mapped_column(DateTime(timezone=True), nullable=False),
+                mapped_column(_date_time(), nullable=False),
                 "meta.lastModified",
             ),
             ("meta_version", version, "meta.version"),

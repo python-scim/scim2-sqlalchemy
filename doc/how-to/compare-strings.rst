@@ -90,11 +90,11 @@ Both give the same results only when the database follows the comparison key:
 
 - On SQLite, the storage calls the comparison key for each row, and follows it exactly. No index
   serves these filters.
-- On PostgreSQL, the storage cannot call the comparison key. It compares the strings in the form of
-  the default comparison key, and warns when the policy sets another one. With the comparison key of
+- On PostgreSQL and MariaDB, the storage cannot call the comparison key. It compares the strings
+  in the form of the default comparison key, and warns when the policy sets another one. With the comparison key of
   this guide, a search on ``ＢＪＥＮＳＥＮ`` finds nothing, and ``ｂｊｅｎｓｅｎ`` can be created next to
   ``bjensen``. A PATCH request still compares in Python, and takes the two names as equal.
 
-On PostgreSQL, keep the default comparison key. Even then, a few letters differ between Python and
-the database, such as ``İ`` and the final sigma. For the details of each database, read
+On PostgreSQL and MariaDB, keep the default comparison key. Even then, a few letters differ between
+Python and the database, such as ``İ`` and the final sigma. For the details of each database, read
 :doc:`../explanation`.

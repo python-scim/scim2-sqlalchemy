@@ -28,6 +28,7 @@ from scim2_sqlalchemy.mapping import _holds_text
 from scim2_sqlalchemy.query import _as_key
 
 from .models import ENTERPRISE
+from .models import TYPES
 from .models import EmailRecord
 from .models import GroupRecord
 from .models import UserRecord
@@ -36,7 +37,7 @@ from .models import users_mapping
 
 
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = TYPES
 
 
 class Opaque(UserDefinedType[str]):

@@ -25,8 +25,9 @@ from scim2_models import UniquenessException
 from scim2_server.storage import AsyncScimStorage
 from scim2_server.storage import ScimStorage
 from scim2_server.storage import SearchPage
+from sqlalchemy import Dialect
 from sqlalchemy import Select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -43,6 +44,7 @@ from .keyset import _anchor
 from .keyset import _position
 from .mapping import ResourceMapping
 from .mapping import _Collection
+from .mapping import _Column
 from .query import _as_key
 from .query import _links_statement
 from .query import _load_statement
@@ -80,6 +82,16 @@ def _holds_id(collection: _Collection, record: Any, value: str) -> bool:
     """Tell whether a record a Link links to has an identifier."""
     target_id = collection.target._id  # type: ignore[union-attr]
     return bool(getattr(record, target_id.key) == _as_key(target_id, value))
+
+
+def _has_text_id(id_column: _Column, record: Any, value: str | None) -> bool:
+    """Tell whether a record found by a string identifier has exactly this identifier.
+
+    A collation of the database, such as the default one of MariaDB, can
+    ignore the case and the trailing spaces of a string.
+    """
+    key = _as_key(id_column, value)
+    return not isinstance(key, str) or getattr(record, id_column.key) == key
 
 
 def _by_position(rows: Sequence[Any]) -> dict[int, list[str]]:
@@ -133,12 +145,55 @@ def _cursor_page(
     return page
 
 
-def _nothing() -> None:
-    """Check nothing, as the default uniqueness check of a flush."""
+_UNIQUE_VIOLATIONS = {
+    "23505",
+    "SQLITE_CONSTRAINT_UNIQUE",
+    "SQLITE_CONSTRAINT_PRIMARYKEY",
+    1062,
+}
+"""The codes of a unique value already taken: the SQLSTATE of PostgreSQL, the
+name of the SQLite error, and the number of the MariaDB error."""
+
+_CHANGED_MEANWHILE = 1020
+"""The number of the MariaDB error on a record another transaction changed since it was read."""
+
+_SAVEPOINT_GONE = 1305
+"""The number of the MariaDB error on a savepoint that no longer exists."""
 
 
-async def _nothing_async() -> None:
-    """Check nothing, as the default uniqueness check of a flush."""
+def _error_code(error: BaseException | None) -> Any:
+    """Return the code of an error of a database driver.
+
+    The MariaDB drivers give the number of the error, in errno or first in
+    args, and a SQLSTATE too generic to tell a unique value taken.
+    """
+    errno = getattr(error, "errno", None)
+    if isinstance(errno, int):
+        return errno
+    args = getattr(error, "args", ())
+    if args and isinstance(args[0], int):
+        return args[0]
+    for attribute in ("sqlstate", "pgcode", "sqlite_errorname"):
+        code = getattr(error, attribute, None)
+        if code is not None:
+            return code
+    return None
+
+
+def _translate(exception: DBAPIError) -> None:
+    """Raise the SCIM error of a database error: 409 for a unique value taken, 412 for a record changed meanwhile.
+
+    MariaDB rolls back the whole transaction on a record changed meanwhile.
+    Rolling back to the savepoint then fails, and its error holds the first
+    one as its context.
+    """
+    code = _error_code(exception.orig)
+    if code == _SAVEPOINT_GONE and isinstance(exception.__context__, DBAPIError):
+        code = _error_code(exception.__context__.orig)
+    if code in _UNIQUE_VIOLATIONS:
+        raise UniquenessException from exception
+    if code == _CHANGED_MEANWHILE:
+        raise PreconditionFailedException from exception
 
 
 class _StorageBase:
@@ -283,13 +338,13 @@ class _StorageBase:
         ):
             raise PreconditionFailedException
 
-    def _comparator(self, dialect: str) -> _Comparator:
+    def _comparator(self, dialect: Dialect) -> _Comparator:
         """Return how a database compares strings, built once for each dialect."""
-        if dialect not in self._comparators:
-            self._comparators[dialect] = _comparator(
+        if dialect.name not in self._comparators:
+            self._comparators[dialect.name] = _comparator(
                 dialect, self._policy, self.mappings.values()
             )
-        return self._comparators[dialect]
+        return self._comparators[dialect.name]
 
     @staticmethod
     def _unique_statements(
@@ -510,7 +565,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
             self.session().add(record)
             _from_scim(mapping, resource, record, links, creating=True)
 
-        self._flush(change, lambda: self._check_uniqueness(mapping, resource, None))
+        self._flush(change)
         return self.get(resource_type, str(getattr(record, mapping._id.key)))
 
     def update(
@@ -528,10 +583,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         self._check_storable(resource_type, resource, stored)
         self._check_uniqueness(mapping, resource, stored)
         links = self._links(mapping, resource)
-        self._flush(
-            lambda: self._write_record(mapping, resource, record, links),
-            lambda: self._check_uniqueness(mapping, resource, stored),
-        )
+        self._flush(lambda: self._write_record(mapping, resource, record, links))
         return self.get(resource_type, resource.id)  # type: ignore[arg-type]
 
     def delete(
@@ -558,7 +610,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         statement = _load_statement(mapping, resource_id, parameters)
         _expire(self.session(), mapping, resource_id)
         record = None if statement is None else self.session().scalar(statement)
-        if record is None:
+        if record is None or not _has_text_id(mapping._id, record, resource_id):
             raise self._not_found(resource_type, resource_id)
         return record
 
@@ -578,7 +630,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     def _ready_comparator(self, session: Session) -> _Comparator:
         """Return how the database of the session compares strings, ready to compare them."""
         connection = session.connection()
-        comparator = self._comparator(connection.dialect.name)
+        comparator = self._comparator(connection.dialect)
         comparator.prepare(connection.connection.driver_connection)
         return comparator
 
@@ -601,16 +653,13 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
             links |= self._assign_links(found, entries)
         return links
 
-    def _flush(
-        self,
-        change: Callable[[], None],
-        check_uniqueness: Callable[[], None] = _nothing,
-    ) -> None:
+    def _flush(self, change: Callable[[], None]) -> None:
         """Apply a change in a savepoint, and flush it.
 
         A version changed in the meantime by another transaction raises a 412.
-        On an integrity error, check_uniqueness runs again, so that a unique
-        value taken in the meantime raises a 409.
+        A unique value taken in the meantime raises a 409, as does a value
+        the unique constraint of the database refuses, such as a value that
+        differs only by its accents under a collation ignoring them.
         """
         session = self.session()
         try:
@@ -619,8 +668,8 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
                 session.flush()
         except StaleDataError as exception:
             raise PreconditionFailedException from exception
-        except IntegrityError:
-            check_uniqueness()
+        except DBAPIError as exception:
+            _translate(exception)
             raise
 
 
@@ -722,9 +771,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
             self.session().add(record)
             _from_scim(mapping, resource, record, links, creating=True)
 
-        await self._flush(
-            change, lambda: self._check_uniqueness(mapping, resource, None)
-        )
+        await self._flush(change)
         return await self.get(resource_type, str(getattr(record, mapping._id.key)))
 
     async def update(
@@ -746,9 +793,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         async def change() -> None:
             self._write_record(mapping, resource, record, links)
 
-        await self._flush(
-            change, lambda: self._check_uniqueness(mapping, resource, stored)
-        )
+        await self._flush(change)
         return await self.get(resource_type, resource.id)  # type: ignore[arg-type]
 
     async def delete(
@@ -779,7 +824,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         statement = _load_statement(mapping, resource_id, parameters)
         _expire(self.session(), mapping, resource_id)
         record = None if statement is None else await self.session().scalar(statement)
-        if record is None:
+        if record is None or not _has_text_id(mapping._id, record, resource_id):
             raise self._not_found(resource_type, resource_id)
         return record
 
@@ -799,7 +844,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     async def _ready_comparator(self, session: "AsyncSession") -> _Comparator:
         """Return how the database of the session compares strings, ready to compare them."""
         connection = await session.connection()
-        comparator = self._comparator(connection.dialect.name)
+        comparator = self._comparator(connection.dialect)
         raw = await connection.get_raw_connection()
         await comparator.prepare_async(raw.driver_connection)
         return comparator
@@ -819,11 +864,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
             links |= self._assign_links(found, entries)
         return links
 
-    async def _flush(
-        self,
-        change: Callable[[], Awaitable[None]],
-        check_uniqueness: Callable[[], Awaitable[None]] = _nothing_async,
-    ) -> None:
+    async def _flush(self, change: Callable[[], Awaitable[None]]) -> None:
         """Apply a change in a savepoint, and flush it, as the synchronous storage does."""
         session = self.session()
         try:
@@ -832,6 +873,6 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
                 await session.flush()
         except StaleDataError as exception:
             raise PreconditionFailedException from exception
-        except IntegrityError:
-            await check_uniqueness()
+        except DBAPIError as exception:
+            _translate(exception)
             raise

@@ -23,7 +23,7 @@ from scim2_models.path import ValuePath
 from scim2_models.path import coerce_value
 from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
-from sqlalchemy import Float
+from sqlalchemy import Double
 from sqlalchemy import Integer
 from sqlalchemy import Numeric
 from sqlalchemy import Select
@@ -36,12 +36,15 @@ from sqlalchemy import inspect
 from sqlalchemy import literal
 from sqlalchemy import not_
 from sqlalchemy import null
-from sqlalchemy import nulls_last
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import true
 from sqlalchemy import union_all
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Mapper
+from sqlalchemy.sql.compiler import SQLCompiler
+from sqlalchemy.sql.visitors import InternalTraversal
+from sqlalchemy.types import TypeEngine
 
 from .comparison import _SUBSTRINGS
 from .comparison import _Comparator
@@ -49,7 +52,9 @@ from .conversion import _as_stored
 from .keyset import _Anchor
 from .keyset import _beyond
 from .keyset import _keyset_order
+from .keyset import _Sorted
 from .mapping import _INTEGERS
+from .mapping import _MARIADB
 from .mapping import ResourceMapping
 from .mapping import _Collection
 from .mapping import _Column
@@ -68,6 +73,34 @@ _Row = TypeVarTuple("_Row")
 
 _FAMILIES: dict[type | None, type] = {float: int, decimal.Decimal: int}
 """The Python types of sort values that a UNION puts in one column, by the type standing for them."""
+
+_DECIMAL = Numeric().with_variant(Numeric(65, 30), *_MARIADB)
+"""The type of decimal sort values in a UNION. MariaDB would otherwise keep no digit after the point."""
+
+
+class _TypedNull(ColumnElement[Any]):
+    """A NULL of a type, which PostgreSQL needs to unite it with the values of other tables."""
+
+    inherit_cache = True
+    _traverse_internals = [("type", InternalTraversal.dp_type)]
+
+    def __init__(self, type_: Any) -> None:
+        self.type = type_
+
+
+@compiles(_TypedNull)
+def _compile_typed_null(element: _TypedNull, compiler: SQLCompiler, **kw: Any) -> str:
+    """Write the NULL cast to its type."""
+    return compiler.process(cast(null(), element.type), **kw)
+
+
+@compiles(_TypedNull, "mariadb")
+@compiles(_TypedNull, "mysql")
+def _compile_typed_null_mariadb(
+    element: _TypedNull, compiler: SQLCompiler, **kw: Any
+) -> str:
+    """Write a bare NULL, since MariaDB cannot cast to every type, such as a boolean."""
+    return "NULL"
 
 
 def _as_key(column: _Column, value: Any) -> Any:
@@ -419,7 +452,7 @@ def _first_entry(collection: _Collection, expression: Any) -> Any:
     order: list[Any] = []
     primary = collection.columns.get("primary")
     if primary is not None:
-        order.append(nulls_last(primary.expression.desc()))
+        order.append(_Sorted(primary.expression, ascending=False, last=True))
     order.extend(relationship.order_by or entry_mapper.primary_key)
     return (
         select(expression)
@@ -530,7 +563,7 @@ def _root_statements(
     if len(types) > 1:
         # The column of the union takes the type of the first key, which
         # would read and bind the numbers of the other keys in that type.
-        common = Numeric() if decimal.Decimal in types else Float()
+        common: TypeEngine[Any] = _DECIMAL if decimal.Decimal in types else Double()
         keys = [None if key is None else cast(key, common) for key in keys]
     key_type = next((key.type for key in keys if key is not None), None)
 
@@ -551,9 +584,7 @@ def _root_statements(
             mapping._id.text.label("id"),
         ]
         if key_type is not None:
-            # PostgreSQL needs the type of a NULL to unite it with the keys
-            # of the other tables.
-            key = cast(null(), key_type) if key is None else key
+            key = _TypedNull(key_type) if key is None else key
             columns.append(key.label("key"))
         branches.append(select(*columns).where(condition))
     rows = union_all(*branches).subquery()

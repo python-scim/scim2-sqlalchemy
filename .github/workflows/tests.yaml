@@ -42,6 +42,11 @@ jobs:
           enable-cache: true
       - name: Put the PostgreSQL server of the runner in the PATH
         run: ls -d /usr/lib/postgresql/*/bin | tail -n 1 >> "$GITHUB_PATH"
+      - name: Replace the MySQL server of the runner with MariaDB
+        run: |
+          sudo apt-get purge --yes 'mysql-*'
+          sudo apt-get update
+          sudo apt-get install --yes mariadb-server
       - name: Run tests
         run: uv run pytest --showlocals
 
@@ -59,6 +64,11 @@ jobs:
           enable-cache: true
       - name: Put the PostgreSQL server of the runner in the PATH
         run: ls -d /usr/lib/postgresql/*/bin | tail -n 1 >> "$GITHUB_PATH"
+      - name: Replace the MySQL server of the runner with MariaDB
+        run: |
+          sudo apt-get purge --yes 'mysql-*'
+          sudo apt-get update
+          sudo apt-get install --yes mariadb-server
       - name: Run tests
         run: uv run pytest --cov --cov-fail-under=100
 

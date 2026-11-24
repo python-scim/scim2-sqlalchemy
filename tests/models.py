@@ -8,12 +8,16 @@ from scim2_models import Extension
 from scim2_models import Group
 from scim2_models import User
 from sqlalchemy import Column
+from sqlalchemy import DateTime
+from sqlalchemy import Double
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
+from sqlalchemy import Numeric
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import cast
 from sqlalchemy import func
+from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
@@ -37,8 +41,17 @@ class Ranked(Extension):
     rank: int | None = None
 
 
+TYPES = {
+    str: String().with_variant(String(255), "mariadb"),
+    float: Double(),
+    decimal.Decimal: Numeric().with_variant(Numeric(38, 10), "mariadb"),
+    datetime.datetime: DateTime().with_variant(mysql.DATETIME(fsp=6), "mariadb"),
+}
+"""The column types of the records, with the lengths and precisions MariaDB needs."""
+
+
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = TYPES
 
 
 class Shifted(TypeDecorator[int]):
@@ -194,6 +207,16 @@ class GroupRecord(Base):
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+    @hybrid_property
+    def text_id(self) -> str:
+        """Return the identifier as a string, over the integer column in SQL."""
+        return str(self.id)
+
+    @text_id.inplace.expression
+    @classmethod
+    def _text_id_expression(cls):
+        return cls.id
 
 
 class BadgeRecord(Base):

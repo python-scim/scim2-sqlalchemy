@@ -282,6 +282,40 @@ def test_a_sort_on_integers_and_decimals_mixes_them(
     ] == ["one and a half", "two", "two and a half"]
 
 
+def test_large_integers_keep_their_order_among_floats(
+    storage_factory, user_type, group_type
+):
+    """An integer beyond the precision of a single-precision float keeps its place among floats."""
+    groups = ResourceMapping(
+        Group[NumberRanked],
+        GroupRecord,
+        {
+            "id": GroupRecord.id,
+            "displayName": GroupRecord.display_name,
+            f"{RANKED}:rank": GroupRecord.score,
+            "meta.created": GroupRecord.created,
+            "meta.lastModified": GroupRecord.last_modified,
+        },
+        version=GroupRecord.version,
+    )
+    storage = storage_factory(
+        mappings={"User": ranked_mapping(UserRecord.badge_number), "Group": groups}
+    )
+    user = User[Ranked](user_name="larger")
+    user[Ranked] = Ranked(rank=2**24 + 1)
+    storage.create(user_type, user)
+    group = Group[NumberRanked](display_name="smaller")
+    group[NumberRanked] = NumberRanked(rank=2**24 + 0.5)
+    storage.create(group_type, group)
+
+    _, found = search(storage, [user_type, group_type], sort_by=f"{RANKED}:rank")
+
+    assert [getattr(r, "user_name", None) or r.display_name for r in found] == [
+        "smaller",
+        "larger",
+    ]
+
+
 def test_a_whole_number_anchors_a_sort_on_decimal_numbers(storage_factory, group_type):
     """A database may return a decimal number without fraction as an integer, which a cursor keeps."""
     groups = ResourceMapping(

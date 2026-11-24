@@ -15,7 +15,8 @@ into error responses:
      - The stored version differs from ``expected_version``, or another transaction changed the
        record before the write.
    * - :class:`~scim2_models.UniquenessException`
-     - Another resource holds a unique value of the resource, such as its ``userName``.
+     - Another resource holds a unique value of the resource, such as its ``userName``, or a
+       unique constraint of the database refuses a value.
    * - :class:`~scim2_models.InvalidValueException`
      - The resource holds a value no mapping stores, an entry of a
        :class:`~scim2_sqlalchemy.Link` without ``value``, a link to an unknown resource, or a

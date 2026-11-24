@@ -27,6 +27,7 @@ from sqlalchemy import cast
 from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import literal
+from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import InstrumentedAttribute
@@ -36,6 +37,16 @@ from sqlalchemy.orm import strategy_options
 from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.functions import FunctionElement
 from sqlalchemy.types import TypeDecorator
+from sqlalchemy.types import TypeEngine
+
+_MARIADB = ("mysql", "mariadb")
+"""The names of the dialects connecting to MariaDB."""
+
+_MARIADB_TEXT = mysql.TEXT(charset="utf8mb4", collation="utf8mb4_nopad_bin")
+"""The type of a string column without length on MariaDB, which needs a length for a VARCHAR.
+
+Its values differ by code point, as the storage compares them.
+"""
 
 _INTEGERS = range(-(2**63), 2**63)
 """The integers a database can store, in a BIGINT or in an SQLite INTEGER."""
@@ -80,7 +91,7 @@ def _compile_uuid_text(element: _UuidText, compiler: SQLCompiler, **kw: Any) -> 
     text: ColumnElement[str] = cast(column, String)
     uuid_type = _uuid_type(column.type.dialect_impl(compiler.dialect))
     if uuid_type is not None and not (
-        compiler.dialect.supports_native_uuid and uuid_type.native_uuid
+        compiler.dialect.supports_native_uuid and uuid_type.native
     ):
         groups = [
             func.substr(text, start, length, type_=String)
@@ -174,7 +185,7 @@ class Hashed(TypeDecorator[str]):
     Map it with ``readable=False``, since the storage cannot read a hash back.
 
     :param hash_value: The function hashing a value.
-    :param length: The length of the column.
+    :param length: The length of the column. Without it, MariaDB stores a TEXT.
     """
 
     impl = String
@@ -185,6 +196,13 @@ class Hashed(TypeDecorator[str]):
     ) -> None:
         super().__init__(length)
         self.hash_value = hash_value
+        self.length = length
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        """Return the type of the column, a TEXT on MariaDB without a length."""
+        if self.length is None and dialect.name in _MARIADB:
+            return dialect.type_descriptor(_MARIADB_TEXT)
+        return dialect.type_descriptor(self.impl_instance)
 
     def process_bind_param(self, value: str | None, dialect: Dialect) -> str | None:
         """Hash the value before it is sent to the database."""

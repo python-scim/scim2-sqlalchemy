@@ -17,11 +17,12 @@ from sqlalchemy import Uuid
 from sqlalchemy import literal
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy.dialects import mssql
 from sqlalchemy.dialects import mysql
 from sqlalchemy.types import TypeDecorator
 
+from scim2_sqlalchemy.comparison import _CodePoints
 from scim2_sqlalchemy.comparison import _comparator
-from scim2_sqlalchemy.comparison import _Normalizer
 from scim2_sqlalchemy.mapping import _UuidText
 from scim2_sqlalchemy.query import _search_statements
 
@@ -58,15 +59,17 @@ def user_names(storage, resource_type, **parameters):
     return [resource.user_name for resource in page.resources]
 
 
-def test_a_decomposed_value_matches_its_composed_form(storage, user_type):
+def test_a_decomposed_value_matches_its_composed_form(storage, user_type, database_url):
     """Both sides are normalized to NFC, whatever form the value was written in."""
+    if database_url.startswith("mariadb"):
+        pytest.skip("MariaDB has no normalize(): a stored value keeps its form")
     storage.create(user_type, UserModel(user_name="Jose\u0301"))
 
     assert user_names(storage, user_type, filter='userName eq "José"') == ["Jose\u0301"]
 
 
 def test_a_decomposed_value_is_taken(storage, user_type):
-    """The uniqueness check compares the values in NFC."""
+    """The uniqueness check compares the values in NFC. On MariaDB, the unique constraint of the column catches it."""
     storage.create(user_type, UserModel(user_name="José"))
 
     with pytest.raises(UniquenessException):
@@ -89,6 +92,21 @@ def test_a_case_exact_attribute_keeps_its_case_in_substrings(
 ):
     """SQLite ignores the case of ASCII letters in LIKE, which a caseExact attribute must not."""
     storage.create(user_type, UserModel(user_name="bjensen", external_id="abc"))
+
+    assert user_names(storage, user_type, filter=filter) == expected
+
+
+@pytest.mark.parametrize(
+    ("filter", "expected"),
+    [
+        ('userName eq "bob "', []),
+        ('externalId eq "bob "', []),
+        ('userName lt "bob "', ["bob"]),
+    ],
+)
+def test_trailing_spaces_count(storage, user_type, filter, expected):
+    """A value with trailing spaces is another value, as in scim2-models, though MariaDB ignores them by default."""
+    storage.create(user_type, UserModel(user_name="bob", external_id="bob"))
 
     assert user_names(storage, user_type, filter=filter) == expected
 
@@ -194,18 +212,48 @@ def test_a_database_without_the_key_warns(
         ('externalId eq "A"', "users.external_id = 'A'"),
         (
             'userName co "a%"',
-            "lower(users.user_name) LIKE concat('%%', lower('a/%%'), '%%')",
+            "lower(users.user_name) LIKE '%' + lower('a/%') + '%' ESCAPE '/'",
         ),
     ],
 )
 def test_another_database_lowers_both_sides(filter, expected):
-    """A database other than SQLite and PostgreSQL compares with its own lower()."""
-    comparator = _comparator("mysql", ScimPolicy(), [USERS])
+    """A database other than SQLite, PostgreSQL and MariaDB compares with its own lower()."""
+    comparator = _comparator(mssql.dialect(), ScimPolicy(), [USERS])
     count, _ = _search_statements(USERS, SearchRequest(filter=filter), comparator)
 
-    sql = count.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
+    sql = count.compile(dialect=mssql.dialect(), compile_kwargs={"literal_binds": True})
 
     assert expected in str(sql)
+
+
+def mariadb_dialect(is_mariadb, version):
+    dialect = mysql.dialect(is_mariadb=is_mariadb)
+    dialect.server_version_info = version
+    return dialect
+
+
+@pytest.mark.parametrize(
+    "dialect",
+    [
+        mariadb_dialect(is_mariadb=False, version=(8, 4, 0)),
+        mariadb_dialect(is_mariadb=True, version=(10, 6, 0)),
+        mariadb_dialect(is_mariadb=True, version=None),
+    ],
+    ids=["MySQL", "MariaDB before 10.10", "MariaDB of an unknown version"],
+)
+def test_mysql_and_old_mariadb_are_refused(dialect):
+    """Their collations cannot compare strings by code point while lowering recent letters."""
+    with pytest.raises(ValueError, match="MariaDB 10.10"):
+        _comparator(dialect, ScimPolicy(), [USERS])
+
+
+def test_mariadb_is_reached_through_the_mysql_dialect():
+    """A mysql URL to a MariaDB server compares strings as MariaDB does."""
+    comparator = _comparator(
+        mariadb_dialect(is_mariadb=True, version=(11, 4, 0)), ScimPolicy(), [USERS]
+    )
+
+    assert isinstance(comparator, _CodePoints)
 
 
 @pytest.mark.parametrize(
@@ -221,8 +269,8 @@ def test_another_database_lowers_both_sides(filter, expected):
         "Ω",
     ],
 )
-def test_postgresql_approaches_the_default_key(session, database_url, value):
-    """PostgreSQL gives the form of the default key, except for a few letters such as İ and the final sigma."""
+def test_the_database_approaches_the_default_key(session, database_url, value):
+    """PostgreSQL and MariaDB give the form of the default key, except for a few letters such as İ and the final sigma."""
     if database_url.startswith("sqlite"):
         pytest.skip("SQLite calls the comparison key itself")
     column = next(
@@ -230,11 +278,19 @@ def test_postgresql_approaches_the_default_key(session, database_url, value):
         for column in USERS._string_columns()
         if column.binding.urn.endswith(":userName")
     )
-    expression = _Normalizer(ScimPolicy()).operand(column, value)
+    comparator = _comparator(session.connection().dialect, ScimPolicy(), [USERS])
+    expression = comparator.operand(column, value)
 
     assert session.scalar(select(expression)) == default_comparison_key(
         column.binding, value
     )
+
+
+LINGUISTIC_COLLATIONS = {
+    "postgresql": 'ALTER TABLE users ALTER COLUMN user_name TYPE varchar COLLATE "und-x-icu"',
+    "mariadb": "ALTER TABLE users MODIFY user_name VARCHAR(255) NOT NULL COLLATE utf8mb4_uca1400_as_ci",
+}
+"""The statement giving the names of the users a collation that orders é before f."""
 
 
 @pytest.mark.parametrize(
@@ -244,17 +300,13 @@ def test_postgresql_approaches_the_default_key(session, database_url, value):
         ({"filter": 'userName lt "f"'}, ["e"]),
     ],
 )
-def test_postgresql_orders_strings_by_code_point(
+def test_the_database_orders_strings_by_code_point(
     sync_storage_factory, session, database_url, user_type, parameters, expected
 ):
     """The order of scim2-models holds whatever the collation of the column."""
     if database_url.startswith("sqlite"):
         pytest.skip("SQLite orders strings by code point")
-    session.execute(
-        text(
-            'ALTER TABLE users ALTER COLUMN user_name TYPE varchar COLLATE "und-x-icu"'
-        )
-    )
+    session.execute(text(LINGUISTIC_COLLATIONS[session.connection().dialect.name]))
     storage = sync_storage_factory()
     for name in ("é", "f", "e"):
         storage.create(user_type, UserModel(user_name=name))

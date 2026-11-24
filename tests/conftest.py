@@ -1,7 +1,9 @@
 import asyncio
+import getpass
 import shutil
 
 import pytest
+from pytest_mysql import factories
 from scim2_models import ResourceType
 from scim2_models import ScimProvider
 from scim2_server.testing import BlockingStorage
@@ -22,12 +24,31 @@ from .models import MAPPINGS
 from .models import USERS
 from .models import Base
 
-DATABASES = ["sqlite"] + (["postgresql"] if shutil.which("pg_ctl") else [])
-"""The databases of the tests: PostgreSQL too when its server is installed."""
+DATABASES = (
+    ["sqlite"]
+    + (["postgresql"] if shutil.which("pg_ctl") else [])
+    + (["mariadb"] if shutil.which("mariadbd") else [])
+)
+"""The databases of the tests: PostgreSQL and MariaDB too when their servers are installed."""
+
+ASYNC_DRIVERS = {
+    "sqlite://": "sqlite+aiosqlite://",
+    "mariadb+pymysql://": "mariadb+asyncmy://",
+}
+
+mariadb_proc = factories.mysql_proc(
+    mysqld_exec="mariadbd",
+    admin_executable="mariadb-admin",
+    mysqld_safe="mariadbd-safe",
+    install_db="mariadb-install-db",
+    user=getpass.getuser(),
+)
 
 
 def async_url(url):
-    return url.replace("sqlite://", "sqlite+aiosqlite://")
+    for driver, async_driver in ASYNC_DRIVERS.items():
+        url = url.replace(driver, async_driver)
+    return url
 
 
 def sqlite_foreign_keys(dbapi_connection, connection_record):
@@ -55,12 +76,26 @@ def postgresql_url(postgresql_proc):
     )
 
 
+@pytest.fixture(scope="session")
+def mariadb_url(mariadb_proc):
+    """Return the URL of a database on the MariaDB server the tests start."""
+    socket = f"unix_socket={mariadb_proc.unixsocket}"
+    server = create_engine(f"mariadb+pymysql://{mariadb_proc.user}@localhost/?{socket}")
+    with server.connect() as connection:
+        connection.exec_driver_sql("CREATE DATABASE IF NOT EXISTS scim")
+    server.dispose()
+    return (
+        f"mariadb+pymysql://{mariadb_proc.user}@localhost/scim?charset=utf8mb4&{socket}"
+    )
+
+
 @pytest.fixture(params=DATABASES)
 def database_url(request, tmp_path):
     """Return the URL of an empty database, holding the tables of the test models."""
-    sqlite_url = f"sqlite:///{tmp_path}/scim.sqlite"
-    postgresql = request.param == "postgresql"
-    url = request.getfixturevalue("postgresql_url") if postgresql else sqlite_url
+    if request.param == "sqlite":
+        url = f"sqlite:///{tmp_path}/scim.sqlite"
+    else:
+        url = request.getfixturevalue(f"{request.param}_url")
     engine = create_engine(url)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
