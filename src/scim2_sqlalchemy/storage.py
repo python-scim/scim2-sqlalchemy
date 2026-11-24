@@ -22,6 +22,10 @@ from scim2_models import ScimPolicy
 from scim2_models import ScimProvider
 from scim2_models import SearchRequest
 from scim2_models import UniquenessException
+from scim2_server.keyset import Bound
+from scim2_server.keyset import Position
+from scim2_server.keyset import keyset_page
+from scim2_server.keyset import page_rows
 from scim2_server.storage import AsyncScimStorage
 from scim2_server.storage import ScimStorage
 from scim2_server.storage import SearchPage
@@ -39,9 +43,6 @@ from .conversion import _from_scim
 from .conversion import _link_entries
 from .conversion import _to_scim
 from .conversion import _version
-from .keyset import _Anchor
-from .keyset import _anchor
-from .keyset import _position
 from .mapping import ResourceMapping
 from .mapping import _Collection
 from .mapping import _Column
@@ -94,55 +95,26 @@ def _has_text_id(id_column: _Column, record: Any, value: str | None) -> bool:
     return not isinstance(key, str) or getattr(record, id_column.key) == key
 
 
+def _load_position(
+    position: Any, search_request: SearchRequest[Any], type_count: int
+) -> Position | None:
+    """Read the position of a cursor page, or return None for the first page.
+
+    At the root, the position holds the index of a resource type.
+    """
+    return Position.load(
+        position,
+        has_sort=search_request.sort_by is not None,
+        type_count=type_count if type_count > 1 else None,
+    )
+
+
 def _by_position(rows: Sequence[Any]) -> dict[int, list[str]]:
     """Group the identifiers of a page at the root by position of their resource type."""
     ids: dict[int, list[str]] = {}
     for position, record_id, _ in rows:
         ids.setdefault(position, []).append(record_id)
     return ids
-
-
-def _page_rows(
-    rows: Sequence[Any], search_request: SearchRequest[Any], anchor: _Anchor | None
-) -> tuple[list[Any], bool]:
-    """Return the rows of a page in the sort order, and whether more rows follow in the reading direction.
-
-    The rows of a cursor page were read count + 1 at a time, in the reverse
-    order for a previous page.
-    """
-    if search_request.cursor is None:
-        return list(rows), False
-    count = search_request.count
-    more = count is not None and len(rows) > count
-    page = list(rows if count is None else rows[:count])
-    if anchor is not None and not anchor.forward:
-        page.reverse()
-    return page, more
-
-
-def _cursor_page(
-    total: int,
-    resources: list[Resource[Any]],
-    bounds: list[tuple[Any, tuple[Any, ...]]],
-    more: bool,
-    anchor: _Anchor | None,
-) -> SearchPage:
-    """Return a cursor page with the positions of the pages around it.
-
-    bounds holds the sort value and the ties of the first and the last rows
-    of the page. A page is known to follow in the reading direction only. In
-    the other direction, the page the client comes from is assumed to still
-    exist.
-    """
-    page = SearchPage(total, resources)
-    if not bounds:
-        return page
-    forward = anchor is None or anchor.forward
-    if more or not forward:
-        page.next = _position("next", *bounds[-1])
-    if anchor is not None and (more or forward):
-        page.previous = _position("previous", *bounds[0])
-    return page
 
 
 _UNIQUE_VIOLATIONS = {
@@ -254,17 +226,19 @@ class _StorageBase:
         more: bool,
         records: dict[tuple[int, str], Any],
         search_request: SearchRequest[Any],
-        anchor: _Anchor | None,
+        anchor: Position | None,
     ) -> SearchPage:
         """Build the page of a search at the root, from its rows and the records they load."""
         resources = self._root_page(resource_types, rows, records, search_request)
         if search_request.cursor is None:
             return SearchPage(total, resources)
-        bounds = [
-            (key, (type_position, record_id))
-            for type_position, record_id, key in rows[:1] + rows[-1:]
-        ]
-        return _cursor_page(total, resources, bounds, more, anchor)
+        if not rows:
+            return keyset_page(total, resources, None, None, more, anchor)
+        first, last = (
+            Bound(key, record_id, type_position)
+            for type_position, record_id, key in (rows[0], rows[-1])
+        )
+        return keyset_page(total, resources, first, last, more, anchor)
 
     def _page(
         self,
@@ -272,18 +246,22 @@ class _StorageBase:
         total: int,
         rows: Sequence[Any],
         search_request: SearchRequest[Any],
-        anchor: _Anchor | None,
+        anchor: Position | None,
     ) -> SearchPage:
         """Build the page of a search on one resource type, from its records with their sort value and identifier."""
-        page, more = _page_rows(rows, search_request, anchor)
+        page, more = page_rows(rows, search_request, anchor)
         resources = [
             self._to_scim(resource_type, record, search_request)
             for record, _, _ in page
         ]
         if search_request.cursor is None:
             return SearchPage(total, resources)
-        bounds = [(key, (record_id,)) for _, key, record_id in page[:1] + page[-1:]]
-        return _cursor_page(total, resources, bounds, more, anchor)
+        if not page:
+            return keyset_page(total, resources, None, None, more, anchor)
+        first, last = (
+            Bound(key, record_id) for _, key, record_id in (page[0], page[-1])
+        )
+        return keyset_page(total, resources, first, last, more, anchor)
 
     def _model(self, resource_type: ResourceType) -> type[Resource[Any]]:
         """Return the model of the resources of a resource type: the one of the provider, if any."""
@@ -526,7 +504,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         session = self.session()
         comparator = self._ready_comparator(session)
         mappings = [self._mapping(resource_type) for resource_type in resource_types]
-        anchor = _anchor(position, root=len(mappings) > 1)
+        anchor = _load_position(position, search_request, len(mappings))
         if len(mappings) == 1:
             count, statement = _search_statements(
                 mappings[0], search_request, comparator, anchor
@@ -539,9 +517,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
             mappings, search_request, comparator, anchor
         )
         total = session.scalar(count) or 0
-        rows, more = _page_rows(
-            session.execute(statement).all(), search_request, anchor
-        )
+        rows, more = page_rows(session.execute(statement).all(), search_request, anchor)
         records = {}
         for type_position, ids in _by_position(rows).items():
             loading = _records_statement(mappings[type_position], ids, search_request)
@@ -732,7 +708,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         session = self.session()
         comparator = await self._ready_comparator(session)
         mappings = [self._mapping(resource_type) for resource_type in resource_types]
-        anchor = _anchor(position, root=len(mappings) > 1)
+        anchor = _load_position(position, search_request, len(mappings))
         if len(mappings) == 1:
             count, statement = _search_statements(
                 mappings[0], search_request, comparator, anchor
@@ -745,7 +721,7 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
             mappings, search_request, comparator, anchor
         )
         total = await session.scalar(count) or 0
-        rows, more = _page_rows(
+        rows, more = page_rows(
             (await session.execute(statement)).all(), search_request, anchor
         )
         records = {}

@@ -1,5 +1,3 @@
-import datetime
-import decimal
 import uuid
 
 import pytest
@@ -7,9 +5,6 @@ from scim2_models import Group
 from scim2_models import InvalidCursorException
 from scim2_models import SearchRequest
 from scim2_models import User
-
-from scim2_sqlalchemy.keyset import _decode
-from scim2_sqlalchemy.keyset import _encode
 
 from .models import RANKED
 from .models import Ranked
@@ -148,6 +143,16 @@ def test_cursors_page_at_the_root(storage, user_type, group_type, sort_by):
 )
 def test_a_malformed_position_is_an_invalid_cursor(storage, user_type, position):
     """A position the storage did not give raises invalidCursor."""
+    search_request = SearchRequest(cursor="x", sort_by="title")
+
+    with pytest.raises(InvalidCursorException):
+        storage.search([user_type], search_request, position=position)
+
+
+def test_a_sort_value_without_sort_is_an_invalid_cursor(storage, user_type):
+    """A position with a sort value comes from a sorted search, so a search without sortBy refuses it."""
+    position = {"d": "next", "k": "b", "i": str(uuid.uuid4())}
+
     with pytest.raises(InvalidCursorException):
         storage.search([user_type], SearchRequest(cursor="x"), position=position)
 
@@ -168,42 +173,6 @@ def test_a_malformed_root_position_is_an_invalid_cursor(
         storage.search(
             [user_type, group_type], SearchRequest(cursor="x"), position=position
         )
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        None,
-        True,
-        3,
-        1.5,
-        "text",
-        datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.UTC),
-        datetime.date(2026, 10, 9),
-        decimal.Decimal("1.50"),
-        uuid.UUID(int=1),
-    ],
-)
-def test_a_sort_value_survives_its_position(value):
-    """A sort value is read back from its position in its own type."""
-    assert _decode(_encode(value)) == value
-    assert type(_decode(_encode(value))) is type(value)
-
-
-def test_a_sort_value_of_an_unknown_type_cannot_be_paged():
-    """A sort value JSON cannot hold is refused rather than written wrong."""
-    with pytest.raises(TypeError):
-        _encode(b"bytes")
-
-
-@pytest.mark.parametrize(
-    "value",
-    [["a"], {"a": "1", "b": "2"}, {"bytes": "x"}, {"date": 1}, {"decimal": "x"}],
-)
-def test_a_malformed_sort_value_is_an_invalid_cursor(value):
-    """A sort value that no position holds raises invalidCursor."""
-    with pytest.raises(InvalidCursorException):
-        _decode(value)
 
 
 @pytest.fixture
