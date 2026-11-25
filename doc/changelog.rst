@@ -7,8 +7,38 @@ Changelog
 Added
 ^^^^^
 - :meth:`~scim2_sqlalchemy.ResourceMapping.schemas` marks as ``required`` an attribute whose column
-  cannot be ``NULL`` and has no default, so that clients know which values a new resource needs.
-  A write-only attribute stays optional, since a replacement may leave it out.
+  cannot be ``NULL`` and has no default. Clients then know which values a new resource needs.
+
+Fixed
+^^^^^
+- An attribute is write-only when the schema makes it ``writeOnly``, as ``password``. It is also
+  write-only when the schema never returns it, unless it is ``immutable``. Before, only
+  ``readable=False`` made it write-only.
+- A write-only attribute is published with ``returned`` ``never``. It is published as
+  ``writeOnly``, unless it is ``immutable``. It is never published as ``required``, but a new
+  resource still needs its value when its column needs one.
+- A complex attribute is published with ``returned`` ``never`` when none of its sub-attributes is
+  returned.
+- The storage never returns a write-only attribute, nor filters on it. A replacement without it
+  keeps its value. A PATCH that removes it, or a PUT that sets it to ``null``, keeps its value too.
+  The storage does not check that its value is unique: a unique constraint of the database does.
+- A :class:`~scim2_sqlalchemy.Hashed` column can hold a write-only attribute without
+  ``readable=False``.
+
+Changed
+^^^^^^^
+- A mapping that worked in 0.2.0 can now raise a :class:`ValueError`:
+
+  - for an attribute that the storage would neither read nor write, such as a write-only attribute
+    on a property without setter;
+  - for a single :class:`~scim2_sqlalchemy.Link` on a many-to-one relationship whose foreign key
+    cannot be ``NULL``. Removing the link would fail in the database. The schema can make the
+    attribute, and the extension holding it, required instead;
+  - for a :class:`~scim2_sqlalchemy.Link` on a one-to-many relationship whose foreign key cannot
+    be ``NULL``. Removing a link would fail in the database.
+
+- A mapping warns about a column that needs a value but that the storage never writes. Creating a
+  resource would fail in the database.
 
 [0.2.0] - 2026-11-24
 --------------------

@@ -53,7 +53,13 @@ holds the mapped attributes only, and an attribute the mapping only reads is ``r
 
 An attribute whose column cannot be ``NULL`` and has no default is ``required``, so that clients
 know which values a new resource needs. A write-only attribute stays optional in the schema, since
-the storage keeps its value when a replacement leaves it out. A new resource still needs it.
+the storage keeps its value when a replacement leaves it out. A new resource still needs it. A
+column with a default that cannot be ``NULL`` leaves its attribute optional, but its value cannot
+be removed.
+
+An attribute the mapping writes but never reads, with ``readable=False``, is ``writeOnly``, and
+its ``returned`` is ``never``. An ``immutable`` attribute stays ``immutable``. A complex attribute
+whose sub-attributes are all never returned is never returned either.
 
 A required attribute of an extension only applies to a resource that holds the extension. When a
 column of an extension needs a value, declare the extension required on the model, such as

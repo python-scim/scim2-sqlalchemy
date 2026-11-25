@@ -6,7 +6,6 @@ from scim2_models import ScimProvider
 from scim2_models import User
 from scim2_server.utils import load_default_service_provider_config
 
-from scim2_sqlalchemy import Attribute
 from scim2_sqlalchemy import Link
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
@@ -27,7 +26,7 @@ USERS = ResourceMapping(
         "name.familyName": Account.last_name,
         "displayName": Account.full_name,
         "active": Account.active,
-        "password": Attribute(Account.password, readable=False),
+        "password": Account.password,
         "emails": Many(
             Account.emails,
             {

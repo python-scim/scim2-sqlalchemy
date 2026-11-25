@@ -12,6 +12,7 @@ from scim2_models import Mutability
 from scim2_models import Reference
 from scim2_models import Resource
 from scim2_models import ResourceType
+from scim2_models import Returned
 from scim2_models import ScimProvider
 from scim2_models import User
 from scim2_server.applications.wsgi import WSGIApplication
@@ -390,12 +391,13 @@ class Code(ComplexAttribute):
 
 
 class Milestone(ComplexAttribute):
-    """Entries with a multi-valued, a read-only and a write-only sub-attribute."""
+    """Entries with a multi-valued, a read-only, a write-only and a never returned sub-attribute."""
 
     label: str | None = None
     steps: list[str] | None = None
     reached: Annotated[bool | None, Mutability.read_only] = None
     token: Annotated[str | None, Mutability.write_only] = None
+    hint: Annotated[str | None, Returned.never] = None
 
 
 class Key(ComplexAttribute):
@@ -423,6 +425,8 @@ class Project(Resource):
     code: Code | None = None
     tags: list[str] | None = None
     codes: Annotated[list[str] | None, Mutability.write_only] = None
+    tokens: Annotated[list[str] | None, Returned.never] = None
+    serials: Annotated[list[str] | None, Mutability.immutable, Returned.never] = None
     keys: Annotated[list[Key] | None, Mutability.write_only] = None
     milestones: list[Milestone] | None = None
     archives: list[Archive] | None = None
@@ -462,7 +466,7 @@ def project_provider(project=Project):
 
 
 def test_attributes_the_storage_cannot_hold_are_left_out():
-    """A read-only attribute, a write-only number or list, a write-only entry, and a list in a complex attribute get no column."""
+    """A read-only attribute, a write-only number or list, a list never returned, a write-only entry, and a list in a complex attribute get no column."""
     metadata = MetaData()
     generate_mappings(project_provider(), metadata, store=hashing_secrets)
     projects = metadata.tables["projects"].c
@@ -474,6 +478,8 @@ def test_attributes_the_storage_cannot_hold_are_left_out():
     assert isinstance(projects.budget.type, Float)
     assert isinstance(metadata.tables["projects_tags"].c.value.type, String)
     assert "projects_codes" not in metadata.tables
+    assert "projects_tokens" not in metadata.tables
+    assert "projects_serials" in metadata.tables
     assert "projects_keys" not in metadata.tables
     assert "projects_archives" not in metadata.tables
 

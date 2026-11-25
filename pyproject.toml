@@ -117,7 +117,10 @@ testpaths = ["tests", "doc"]
 addopts = "--doctest-modules --doctest-glob='*.rst' --ignore=doc/conf.py"
 pythonpath = ["doc/_examples"]
 doctest_optionflags = "ALLOW_UNICODE ELLIPSIS NORMALIZE_WHITESPACE"
-filterwarnings = ["error::scim2_tester.testing.ScimDeviationWarning"]
+filterwarnings = [
+    "error::scim2_tester.testing.ScimDeviationWarning",
+    "error:The column .* needs a value:UserWarning",
+]
 
 [tool.uv]
 exclude-newer = "14 days"

@@ -62,6 +62,11 @@ storage refuses a resource without this value with a 400 error. It also refuses 
 itself, such as in the constructor of the model or in a ``before_insert`` event. Declare such a
 value as the ``default`` or the ``server_default`` of the column.
 
+The mapping warns about a column of the record that needs a value but that the storage never
+writes, such as a column left out of the mapping or mapped as read-only. Creating a resource
+would then fail in the database. The setter of a property is taken to write the columns that
+its expression reads.
+
 Map an extension
 ----------------
 
@@ -153,7 +158,8 @@ Wrap a column or a property in an :class:`~scim2_sqlalchemy.Attribute` to limit 
 storage does with it:
 
 - with ``readable=False``, the attribute is write-only: the storage never returns it, nor
-  filters or sorts on it.
+  filters or sorts on it. An attribute that the schema makes ``writeOnly``, such as
+  ``password``, or never returns, is write-only too, even without ``readable=False``.
 - with ``writable=False``, the attribute is read-only, even when its column or its property
   can be written.
 
@@ -166,18 +172,25 @@ The intranet hashes the password in the setter of a property:
    :dedent: 4
    :prepend: @hybrid_property
 
-The mapping makes the password write-only:
+The schema makes ``password`` write-only, so the mapping needs no
+:class:`~scim2_sqlalchemy.Attribute`:
 
 .. code-block:: python
 
-   {"password": Attribute(Account.password, readable=False)}
+   {"password": Account.password}
 
 A column of type :class:`~scim2_sqlalchemy.Hashed` hashes the values the same way, without a
-property: ``mapped_column(Hashed(hash_password))``. The mapping refuses it unless
-``readable=False``.
+property: ``mapped_column(Hashed(hash_password))``. The mapping refuses it for an attribute that
+is not write-only.
 
 A write-only attribute keeps its stored value when a request does not carry it, since a
-resource never carries it back.
+resource never carries it back. A PATCH that removes it, or a PUT that sets it to ``null``,
+keeps it too: the server never reads the value, so it finds nothing to remove. The storage does
+not check that a write-only value is unique, since it never reads the stored values: give its
+column a unique constraint instead.
+
+The mapping refuses an attribute that would be neither read nor written, such as a write-only
+attribute on a property without setter.
 
 Map a list of values
 --------------------
@@ -257,6 +270,11 @@ type of the linked resources:
    }
 
 A relationship that does not hold as many records as the attribute raises a :class:`ValueError`.
+A client can remove a single link, so the foreign key of a many-to-one relationship must accept
+``NULL``. The mapping raises a :class:`ValueError` otherwise, unless the schema makes the
+attribute required, and the extension holding it too. Removing a link of a one-to-many
+relationship writes ``NULL`` in the foreign key of the linked record, so this foreign key must
+accept ``NULL`` too.
 The storage reads ``value`` from the identifier of the linked resource, and the display name,
 ``display`` or ``displayName``, from its ``displayName``, or else its ``userName``. With a provider, it also gives each entry a
 ``$ref``. Writing the resource changes the links: a link to an unknown resource, or an entry

@@ -1,4 +1,5 @@
 import datetime
+import warnings
 from typing import Annotated
 
 import pytest
@@ -7,12 +8,16 @@ from scim2_models import ComplexAttribute
 from scim2_models import EnterpriseUser
 from scim2_models import Extension
 from scim2_models import Group
+from scim2_models import Manager
 from scim2_models import Mutability
 from scim2_models import Required
+from scim2_models import Resource
+from scim2_models import Returned
 from scim2_models import User
 from sqlalchemy import ForeignKey
 from sqlalchemy import String
 from sqlalchemy import cast
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import column_property
@@ -21,6 +26,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.types import UserDefinedType
 
 from scim2_sqlalchemy import Attribute
+from scim2_sqlalchemy import Hashed
 from scim2_sqlalchemy import Link
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
@@ -77,17 +83,21 @@ class Unknown(UserDefinedType[str]):
 class Person(Base):
     __tablename__ = "people"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="1")
     id_text: Mapped[str] = column_property(cast(id, String))
-    user_name: Mapped[str]
+    user_name: Mapped[str | None]
     created: Mapped[datetime.datetime]
     last_modified: Mapped[datetime.datetime]
     version: Mapped[int] = mapped_column()
-    other_version: Mapped[int] = mapped_column()
+    other_version: Mapped[int | None] = mapped_column()
     emails: Mapped[list["Address"]] = relationship()
-    opaque: Mapped[str] = mapped_column(Opaque())
-    unknown: Mapped[str] = mapped_column(Unknown())
-    label: Mapped[str] = mapped_column(LabelType())
+    desks: Mapped[list["Desk"]] = relationship(
+        foreign_keys="Desk.owner_id", back_populates="owner"
+    )
+    opaque: Mapped[str | None] = mapped_column(Opaque())
+    unknown: Mapped[str | None] = mapped_column(Unknown())
+    label: Mapped[str | None] = mapped_column(LabelType())
+    secret: Mapped[str | None] = mapped_column(Hashed(str.upper))
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -98,6 +108,49 @@ class Address(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     person_id: Mapped[str] = mapped_column(ForeignKey("people.id"))
     value: Mapped[str | None]
+
+
+class Desk(Base):
+    """A desk, whose owner and keeper cannot be missing."""
+
+    __tablename__ = "desks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="1")
+    created: Mapped[datetime.datetime]
+    last_modified: Mapped[datetime.datetime]
+    version: Mapped[int] = mapped_column()
+    owner_id: Mapped[str] = mapped_column(ForeignKey("people.id"))
+    owner: Mapped[Person] = relationship(
+        foreign_keys=[owner_id], back_populates="desks"
+    )
+    keeper_id: Mapped[str] = mapped_column(ForeignKey("people.id"))
+    keeper: Mapped[Person] = relationship(foreign_keys=[keeper_id])
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+OWNED = "urn:example:params:scim:schemas:extension:owned:2.0:User"
+
+
+class Owned(Extension):
+    __schema__ = URN(OWNED)
+
+    owner: Annotated[Manager | None, Required.true] = None
+    keeper: Annotated[Manager | None, Mutability.read_only] = None
+
+
+def desk_mapping(model, attributes):
+    return ResourceMapping(
+        model,
+        Desk,
+        {
+            "id": Desk.id,
+            "meta.created": Desk.created,
+            "meta.lastModified": Desk.last_modified,
+            **attributes,
+        },
+        version=Desk.version,
+    )
 
 
 REQUIRED = {
@@ -126,6 +179,250 @@ def test_an_identifier_that_can_be_missing_is_refused():
         ValueError, match="'id' is mapped to a column that can hold no value"
     ):
         users_mapping({"id": UserRecord.external_id, "externalId": None})
+
+
+def test_a_hash_holds_a_write_only_attribute_only():
+    """The schema makes password write-only, so its hash needs no readable=False, unlike nickName."""
+    person_mapping(password=Person.secret)
+
+    with pytest.raises(ValueError, match="'nickName' stores a hash"):
+        person_mapping(nickName=Person.secret)
+
+
+@pytest.mark.parametrize(
+    "path, value",
+    [
+        ("title", Attribute(UserRecord.title, readable=False, writable=False)),
+        ("password", UserRecord.lower_name),
+    ],
+    ids=["Attribute", "write-only property without setter"],
+)
+def test_an_attribute_neither_read_nor_written_is_refused(path, value):
+    """The storage would do nothing with it, yet publish it."""
+    with pytest.raises(ValueError, match="neither read nor written"):
+        users_mapping({path: value})
+
+
+def test_a_link_that_can_be_removed_needs_a_foreign_key_accepting_null():
+    """Removing the manager would write NULL in a column that refuses it."""
+    with pytest.raises(ValueError, match="foreign key of its relationship must"):
+        desk_mapping(
+            User[EnterpriseUser],
+            {
+                f"{ENTERPRISE}:manager": Link(Desk.owner, "User"),
+                "userName": Desk.keeper_id,
+            },
+        )
+
+
+def test_a_required_link_of_an_optional_extension_can_be_removed():
+    """A resource without the extension has no owner, so the foreign key must accept NULL."""
+    with pytest.raises(ValueError, match="foreign key of its relationship must"):
+        desk_mapping(
+            User[Owned],
+            {
+                f"{OWNED}:owner": Link(Desk.owner, "User"),
+                f"{OWNED}:keeper": Link(Desk.keeper, "User"),
+            },
+        )
+
+
+class DeskResource(Resource):
+    __schema__ = URN("urn:example:params:scim:schemas:core:2.0:Desk")
+
+    owner: Annotated[Manager | None, Required.true] = None
+    keeper: Annotated[Manager | None, Required.true] = None
+
+
+def test_a_required_link_needs_no_foreign_key_accepting_null():
+    """Every desk has an owner and a keeper, so the links are never removed."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        desk_mapping(
+            DeskResource,
+            {
+                "owner": Link(Desk.owner, "User"),
+                "keeper": Link(Desk.keeper, "User"),
+            },
+        )
+
+
+def test_a_link_to_records_whose_foreign_key_cannot_be_null_is_refused():
+    """Removing a member would write NULL in the owner of its desk."""
+    with pytest.raises(ValueError, match="writes NULL in the foreign key"):
+        ResourceMapping(
+            Group,
+            Person,
+            REQUIRED | {"members": Link(Person.desks, "User")},
+            version=Person.version,
+        )
+
+
+def test_a_column_the_mapping_never_writes_warns():
+    """The keeper is read-only, so a new desk could not be stored, unlike its required owner."""
+    with pytest.warns(UserWarning) as caught:
+        desk_mapping(
+            User[Annotated[Owned, Required.true]],
+            {
+                f"{OWNED}:owner": Link(Desk.owner, "User"),
+                f"{OWNED}:keeper": Link(Desk.keeper, "User"),
+            },
+        )
+
+    assert [str(warning.message) for warning in caught] == [
+        "The column desks.keeper_id needs a value, but the mapping of "
+        "User[Owned] never writes it: map it, or give it a default"
+    ]
+
+
+@pytest.mark.parametrize(
+    "user_name",
+    [None, Attribute(UserRecord.user_name, writable=False)],
+    ids=["unmapped", "read-only"],
+)
+def test_a_column_needing_a_value_warns_when_it_is_not_written(user_name):
+    """Creating a user would fail in the database."""
+    with pytest.warns(UserWarning, match="users.user_name needs a value"):
+        users_mapping({"userName": user_name})
+
+
+class Party(Base):
+    """A party, whose kind tells its class apart."""
+
+    __tablename__ = "parties"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column()
+    created: Mapped[datetime.datetime]
+    last_modified: Mapped[datetime.datetime]
+    version: Mapped[int] = mapped_column()
+
+    __mapper_args__ = {"polymorphic_on": kind, "version_id_col": version}
+
+
+class Member(Party):
+    """A party with a login, written through a property over two columns."""
+
+    __tablename__ = "members"
+
+    id: Mapped[int] = mapped_column(ForeignKey("parties.id"), primary_key=True)
+    first: Mapped[str] = mapped_column()
+    last: Mapped[str] = mapped_column()
+
+    __mapper_args__ = {"polymorphic_identity": "member"}
+
+    @hybrid_property
+    def login(self) -> str:
+        return f"{self.first}.{self.last}"
+
+    @login.inplace.setter
+    def _login_setter(self, value: str) -> None:
+        self.first, self.last = value.split(".")
+
+    @login.inplace.expression
+    @classmethod
+    def _login_expression(cls):
+        return cls.first + "." + cls.last
+
+    first_text: Mapped[str] = column_property(cast(first, String))
+
+
+class Leader(Member):
+    """A member two joined tables away from the parties."""
+
+    __tablename__ = "leaders"
+
+    id: Mapped[int] = mapped_column(ForeignKey("members.id"), primary_key=True)
+
+    __mapper_args__ = {"polymorphic_identity": "leader"}
+
+
+def leader_mapping(user_name):
+    return ResourceMapping(
+        User,
+        Leader,
+        {
+            "id": Leader.id,
+            "userName": user_name,
+            "meta.created": Leader.created,
+            "meta.lastModified": Leader.last_modified,
+        },
+        version=Leader.version,
+    )
+
+
+def test_the_columns_sqlalchemy_or_a_setter_fills_need_no_mapping():
+    """The class discriminator, the inherited keys and the columns of the login setter are written."""
+    leader = Leader(login="ada.lovelace")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        leader_mapping(Leader.login)
+    assert (leader.first, leader.last, leader.login) == (
+        "ada",
+        "lovelace",
+        "ada.lovelace",
+    )
+
+
+class Stamped(Base):
+    """A record whose creation date is written through a property."""
+
+    __tablename__ = "stamped"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime.datetime] = mapped_column()
+    last_modified: Mapped[datetime.datetime]
+    version: Mapped[int] = mapped_column()
+
+    __mapper_args__ = {"version_id_col": version}
+
+    @hybrid_property
+    def created(self) -> datetime.datetime:
+        return self.created_at
+
+    @created.inplace.setter
+    def _created_setter(self, value: datetime.datetime) -> None:
+        self.created_at = value
+
+
+def test_the_dates_written_through_a_property_need_no_mapping():
+    """The storage sets the creation date, so the column behind its property is written."""
+    now = datetime.datetime.now(datetime.UTC)
+    stamped = Stamped(created=now)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ResourceMapping(
+            Group,
+            Stamped,
+            {
+                "id": Stamped.id,
+                "meta.created": Stamped.created,
+                "meta.lastModified": Stamped.last_modified,
+            },
+            version=Stamped.version,
+        )
+    assert stamped.created == now
+
+
+def test_a_column_property_writes_no_column():
+    """Setting a column property writes nothing, so the first and last names are never written."""
+    with pytest.warns(UserWarning) as caught:
+        leader_mapping(Leader.first_text)
+
+    assert [str(warning.message).split(" needs")[0] for warning in caught] == [
+        "The column members.first",
+        "The column members.last",
+    ]
+
+
+def test_the_columns_the_storage_fills_need_no_mapping():
+    """The dates, the version and the numbered key are filled without a written attribute."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        users_mapping()
+        groups_mapping()
 
 
 def test_an_identifier_can_be_a_column_property():
@@ -452,13 +749,122 @@ def test_an_attribute_whose_column_needs_a_value_is_published_required():
     assert employee_number.required == Required.true
 
 
-def test_a_write_only_attribute_is_not_published_required():
+@pytest.mark.parametrize(
+    "password",
+    [Attribute(UserRecord.user_name, readable=False), UserRecord.user_name],
+    ids=["readable=False", "writeOnly in the schema"],
+)
+def test_a_write_only_attribute_is_not_published_required(password):
     """A replacement may leave out a write-only value, which the storage keeps."""
-    password = Attribute(UserRecord.user_name, readable=False)
     (user, _) = users_mapping({"password": password}).schemas()
 
     (attribute,) = [a for a in user.attributes if a.name == "password"]
     assert attribute.required == Required.false
+
+
+HIDDEN = "urn:example:params:scim:schemas:extension:hidden:2.0:User"
+
+
+class Card(ComplexAttribute):
+    number: str | None = None
+
+
+class Hidden(Extension):
+    __schema__ = URN(HIDDEN)
+
+    token: Annotated[str | None, Returned.never] = None
+    badge: Annotated[str | None, Mutability.immutable, Required.true] = None
+    card: Annotated[Card | None, Mutability.immutable, Required.true] = None
+    serial: Annotated[str | None, Mutability.immutable, Returned.never] = None
+
+
+def test_an_attribute_never_returned_is_write_only():
+    """A client never reads the token back, so the storage neither reads it nor requires it."""
+    mapping = ResourceMapping(
+        User[Hidden],
+        UserRecord,
+        {
+            "id": UserRecord.id,
+            "userName": UserRecord.user_name,
+            f"{HIDDEN}:token": UserRecord.user_name,
+            "meta.created": UserRecord.created,
+            "meta.lastModified": UserRecord.last_modified,
+        },
+        version=UserRecord.version,
+    )
+    (_, hidden) = mapping.schemas()
+
+    (token,) = hidden.attributes
+    assert token.required == Required.false
+    assert not mapping._column(f"{HIDDEN}:token").readable
+
+
+@pytest.mark.parametrize(
+    "family_name, expected",
+    [
+        (
+            Attribute(UserRecord.family_name, readable=False),
+            (Mutability.write_only, Returned.never),
+        ),
+        (UserRecord.family_name, (Mutability.read_write, Returned.default)),
+    ],
+    ids=["no sub-attribute returned", "one sub-attribute returned"],
+)
+def test_a_complex_attribute_is_returned_when_one_of_its_sub_attributes_is(
+    family_name, expected
+):
+    """A name whose parts are never returned is never returned either."""
+    given_name = Attribute(UserRecord.given_name, readable=False)
+    mapping = users_mapping(
+        {"name.givenName": given_name, "name.familyName": family_name}
+    )
+    (user, _) = mapping.schemas()
+
+    (name,) = [a for a in user.attributes if a.name == "name"]
+    assert (name.mutability, name.returned) == expected
+
+
+@pytest.mark.parametrize("path", ["badge", "card.number"])
+def test_an_immutable_attribute_the_mapping_only_writes_stays_immutable(path):
+    """A client still sets the badge or the card once, and never reads it back."""
+    mapping = ResourceMapping(
+        User[Hidden],
+        UserRecord,
+        {
+            "id": UserRecord.id,
+            "userName": UserRecord.user_name,
+            f"{HIDDEN}:{path}": Attribute(UserRecord.title, readable=False),
+            "meta.created": UserRecord.created,
+            "meta.lastModified": UserRecord.last_modified,
+        },
+        version=UserRecord.version,
+    )
+    (_, hidden) = mapping.schemas()
+
+    (attribute,) = hidden.attributes
+    assert (attribute.mutability, attribute.returned, attribute.required) == (
+        Mutability.immutable,
+        Returned.never,
+        Required.false,
+    )
+
+
+def test_an_immutable_value_never_returned_is_still_read():
+    """The models check that the serial never changes against the stored one."""
+    mapping = ResourceMapping(
+        User[Hidden],
+        UserRecord,
+        {
+            "id": UserRecord.id,
+            "userName": UserRecord.user_name,
+            f"{HIDDEN}:serial": UserRecord.title,
+            "meta.created": UserRecord.created,
+            "meta.lastModified": UserRecord.last_modified,
+        },
+        version=UserRecord.version,
+    )
+
+    assert mapping._column(f"{HIDDEN}:serial").readable
 
 
 def test_a_complex_attribute_whose_sub_attribute_needs_a_value_is_published_required():
@@ -496,6 +902,16 @@ def test_an_entry_whose_column_needs_a_value_is_published_required():
         "value": Required.true,
         "type": Required.false,
     }
+
+
+def test_an_attribute_the_mapping_only_writes_is_published_write_only():
+    """The storage never returns the title, so clients cannot read it back."""
+    title = Attribute(UserRecord.title, readable=False)
+    (user, _) = users_mapping({"title": title}).schemas()
+
+    (attribute,) = [a for a in user.attributes if a.name == "title"]
+    assert attribute.mutability == Mutability.write_only
+    assert attribute.returned == Returned.never
 
 
 def test_a_link_publishes_its_value_its_ref_its_type_and_a_read_only_display():

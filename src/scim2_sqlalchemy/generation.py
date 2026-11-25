@@ -12,6 +12,7 @@ from scim2_models import Mutability
 from scim2_models import Path
 from scim2_models import Required
 from scim2_models import ResourceType
+from scim2_models import Returned
 from scim2_models import ScimProvider
 from scim2_models import Uniqueness
 from sqlalchemy import Boolean
@@ -33,7 +34,6 @@ from sqlalchemy.types import TypeEngine
 
 from .mapping import _MARIADB
 from .mapping import _MARIADB_TEXT
-from .mapping import Attribute
 from .mapping import Link
 from .mapping import Many
 from .mapping import ResourceMapping
@@ -107,6 +107,17 @@ class _Forward:
     keys: dict[str, str]
     tables: dict[str, Table]
     inverse_keys: dict[str, str]
+
+
+def _hidden(attribute: Any) -> bool:
+    """Tell whether clients never read an attribute back: the storage cannot read it either."""
+    return bool(
+        attribute.mutability == Mutability.write_only
+        or (
+            attribute.mutability != Mutability.immutable
+            and attribute.returned == Returned.never
+        )
+    )
 
 
 class _Class:
@@ -209,10 +220,7 @@ class _Generator:
                         continue
                     if attribute.mutability == Mutability.read_only:
                         continue
-                    if (
-                        attribute.multi_valued
-                        and attribute.mutability == Mutability.write_only
-                    ):
+                    if attribute.multi_valued and _hidden(attribute):
                         self.decisions[urn] = False
                         continue
                     if attribute.type != SchemaAttribute.Type.complex:
@@ -226,10 +234,7 @@ class _Generator:
                         if (
                             not sub.multi_valued
                             and sub.mutability != Mutability.read_only
-                            and not (
-                                attribute.multi_valued
-                                and sub.mutability == Mutability.write_only
-                            )
+                            and not (attribute.multi_valued and _hidden(sub))
                             and self._ask_column(model, sub_urn, sub)
                         ):
                             clear.append(sub_urn)
@@ -467,10 +472,7 @@ class _Generator:
             ),
             path,
         )
-        getter = self._getter(name, key)
-        if attribute.mutability != Mutability.write_only:
-            return getter
-        return lambda: Attribute(getter(), readable=False)
+        return self._getter(name, key)
 
     @staticmethod
     def _type(attribute: Any, decision: bool | TypeEngine[Any]) -> TypeEngine[Any]:

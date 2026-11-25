@@ -98,22 +98,35 @@ def test_a_binary_value_is_read_back_as_sent(storage_factory, user_type):
     assert user.model_dump()["x509Certificates"] == [{"value": "TUlJRA=="}]
 
 
+WRITE_ONLY = pytest.mark.parametrize(
+    "password",
+    [Attribute(UserRecord.password, readable=False), UserRecord.password],
+    ids=["readable=False", "writeOnly in the schema"],
+)
+
+
+@WRITE_ONLY
 def test_a_password_is_written_hashed_and_never_read(
-    sync_storage_factory, session, user_type
+    sync_storage_factory, session, user_type, password
 ):
     """A write-only attribute is written through its setter, and never comes back."""
-    storage = sync_storage_factory()
+    storage = sync_storage_factory(
+        {"User": users_mapping({"password": password}), "Group": groups_mapping()}
+    )
     user = storage.create(user_type, UserModel(user_name="bjensen", password="secret"))
 
     assert user.password is None
     assert session.scalar(select(UserRecord.password_hash)) == "hashed:secret"
 
 
+@WRITE_ONLY
 def test_an_update_without_password_keeps_the_password(
-    sync_storage_factory, session, user_type
+    sync_storage_factory, session, user_type, password
 ):
     """A resource never carries its password back, so its absence changes nothing."""
-    storage = sync_storage_factory()
+    storage = sync_storage_factory(
+        {"User": users_mapping({"password": password}), "Group": groups_mapping()}
+    )
     user = storage.create(user_type, UserModel(user_name="bjensen", password="secret"))
     user.display_name = "Barbara"
 
@@ -122,10 +135,24 @@ def test_an_update_without_password_keeps_the_password(
     assert session.scalar(select(UserRecord.password_hash)) == "hashed:secret"
 
 
-def test_a_password_is_not_filtered_on(storage, user_type):
+@WRITE_ONLY
+def test_a_password_is_not_filtered_on(storage_factory, user_type, password):
     """A write-only attribute cannot be compared."""
+    storage = storage_factory(
+        {"User": users_mapping({"password": password}), "Group": groups_mapping()}
+    )
     with pytest.raises(InvalidFilterException):
         search(storage, user_type, filter='password eq "secret"')
+
+
+def test_a_write_only_attribute_is_not_sorted_on(storage_factory, user_type):
+    """Sorting on a value the storage never returns would disclose its order."""
+    title = Attribute(UserRecord.title, readable=False)
+    storage = storage_factory(
+        {"User": users_mapping({"title": title}), "Group": groups_mapping()}
+    )
+    with pytest.raises(InvalidPathException):
+        search(storage, user_type, sort_by="title")
 
 
 def test_a_missing_value_keeps_the_default_of_the_column(storage, user_type):
@@ -670,7 +697,8 @@ def test_a_column_the_database_numbers_needs_no_value(
 
 def test_another_integrity_error_goes_through(storage_factory, user_type):
     """An integrity error unrelated to unique values is not a 409."""
-    users = users_mapping({"userName": None})
+    with pytest.warns(UserWarning, match="users.user_name needs a value"):
+        users = users_mapping({"userName": None})
     storage = storage_factory({"User": users, "Group": groups_mapping()})
 
     with pytest.raises(IntegrityError):
@@ -920,9 +948,10 @@ def test_an_identifier_is_found_by_its_exact_text(
         )
     )
     session.flush()
-    mapping = users_mapping(
-        {"id": UserRecord.user_name, "userName": UserRecord.display_name}
-    )
+    with pytest.warns(UserWarning, match="users.user_name needs a value"):
+        mapping = users_mapping(
+            {"id": UserRecord.user_name, "userName": UserRecord.display_name}
+        )
     storage = sync_storage_factory(
         mappings={"User": mapping, "Group": groups_mapping()}
     )

@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -16,6 +17,7 @@ from scim2_models import Path
 from scim2_models import Required
 from scim2_models import Resource
 from scim2_models import ResponseParameters
+from scim2_models import Returned
 from scim2_models import Schema
 from scim2_models import Uniqueness
 from sqlalchemy import Column
@@ -31,12 +33,15 @@ from sqlalchemy import literal
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import MANYTOONE
+from sqlalchemy.orm import ONETOMANY
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.orm import Mapper
 from sqlalchemy.orm import RelationshipProperty
 from sqlalchemy.orm import strategy_options
 from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.functions import FunctionElement
+from sqlalchemy.sql.visitors import iterate
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.types import TypeEngine
 
@@ -117,11 +122,13 @@ def _table_column(expression: Any) -> Column[Any] | None:
     return column if isinstance(column, Column) else None
 
 
-def _write_only(binding: AttributeBinding) -> bool:
-    """Whether the schema makes an attribute write-only, itself or through its parent."""
-    return Mutability.write_only in (
-        binding.model.get_field_annotation(binding.field_name, Mutability),
-        binding.get_annotation(Mutability),
+def _needs_value(column: Column[Any]) -> bool:
+    """Whether a new row needs a value: the column holds no null, has no default, and the database does not number it."""
+    return (
+        not column.nullable
+        and column.default is None
+        and column.server_default is None
+        and column is not column.table.autoincrement_column
     )
 
 
@@ -166,7 +173,9 @@ class Attribute:
         :class:`~sqlalchemy.ext.hybrid.hybrid_property`, holding the value.
     :param readable: Whether the storage reads the attribute. When
         :data:`False`, the attribute is write-only, such as a password: the
-        storage never returns it, nor filters or sorts on it.
+        storage never returns it, nor filters or sorts on it. An attribute
+        that the schema makes ``writeOnly``, or never returns, is always
+        write-only.
     :param writable: Whether the storage writes the attribute. When
         :data:`False`, the attribute is read-only.
     """
@@ -183,7 +192,7 @@ class Hashed(TypeDecorator[str]):
     """A column type storing the hash of a string, such as a password.
 
     The column stores what the hash function returns for the value written.
-    Map it with ``readable=False``, since the storage cannot read a hash back.
+    Map it to a write-only attribute, since the storage cannot read a hash back.
 
     :param hash_value: The function hashing a value.
     :param length: The length of the column. Without it, MariaDB stores a TEXT.
@@ -260,7 +269,10 @@ class Link:
     read in the order of the list.
 
     :param relationship: The :func:`~sqlalchemy.orm.relationship` from the
-        resource record to the records of the linked resources.
+        resource record to the records of the linked resources. The foreign
+        key of a many-to-one relationship accepts ``NULL``, unless the schema
+        makes the attribute required, and the extension holding it too. The
+        foreign key of a one-to-many relationship always accepts ``NULL``.
     :param resource_type: The name of the resource type of the linked
         resources, as the storage knows it.
     :param type: The ``type`` sub-attribute of the entries, such as ``"User"``
@@ -316,13 +328,7 @@ class _Column:
     def required(self) -> bool:
         """Whether a new record needs a value: the column holds no null, has no default, and the database does not number it."""
         column = _table_column(self.expression)
-        return (
-            column is not None
-            and not column.nullable
-            and column.default is None
-            and column.server_default is None
-            and column is not column.table.autoincrement_column
-        )
+        return column is not None and _needs_value(column)
 
     @property
     def enumeration(self) -> SqlEnum | None:
@@ -453,7 +459,13 @@ class ResourceMapping:
         does: adding a member to a group leaves the version of the user as it is.
     :raises ValueError: When a path is not valid for the model, when a
         value does not fit the attribute of its path, or when ``id`` is mapped
-        to a column that can hold ``NULL``.
+        to a column that can hold ``NULL``. Also when the storage would neither
+        read nor write an attribute, when a readable attribute is mapped to a
+        :class:`Hashed` column, or when removing a :class:`Link` would write
+        ``NULL`` in a foreign key that refuses it.
+
+    The mapping warns about a column that needs a value but that the storage
+    never writes.
     """
 
     _REQUIRED = ("id", "meta.created", "meta.lastModified")
@@ -504,14 +516,75 @@ class ResourceMapping:
         self._id.textual = not _holds_text(self._id.expression)
         self._created = self._column("meta.created")
         self._last_modified = self._column("meta.lastModified")
+        self._warn_unwritten()
+
+    def _always_held(self, binding: AttributeBinding) -> bool:
+        """Tell whether the schema makes every resource hold an attribute, and the extension holding it."""
+        if Required.true not in (
+            binding.model.get_field_annotation(binding.field_name, Required),
+            binding.get_annotation(Required),
+        ):
+            return False
+        if binding.model not in self.model.get_extension_models().values():
+            return True
+        required = self.model.get_field_annotation(binding.model.__name__, Required)
+        return bool(required == Required.true)
+
+    def _warn_unwritten(self) -> None:
+        """Warn about the columns of the record that need a value the storage never writes."""
+        written: list[Any] = [
+            _table_column(mapped.expression)
+            for mapped in self._columns.values()
+            if mapped.writable or mapped in (self._created, self._last_modified)
+        ]
+        mapper: Mapper[Any] = inspect(self.record)
+        # The setter of a property may write any column its expression reads.
+        for mapped in self._columns.values():
+            descriptor = mapper.all_orm_descriptors.get(mapped.key)
+            # The storage sets the dates itself, read-only as they are.
+            dated = mapped in (self._created, self._last_modified)
+            if (mapped.writable or dated) and isinstance(descriptor, hybrid_property):
+                written += [
+                    element.table.columns.get(element.key)
+                    for element in iterate(mapped.expression.__clause_element__())
+                    if isinstance(element, Column)
+                ]
+        for collection in self._all_collections():
+            if collection.single and not collection.owned and collection.writable:
+                written += collection.relationship_property.local_columns
+        # SQLAlchemy fills the version, the discriminator of the classes, and
+        # the key each joined table shares with the table it inherits from.
+        written += [mapper.version_id_col, mapper.polymorphic_on]
+        for ancestor in mapper.iterate_to_root():
+            if ancestor.inherits is not None:
+                written += [
+                    column
+                    for column in ancestor.local_table.primary_key
+                    if column.foreign_keys
+                ]
+        for column in mapper.columns:
+            if (
+                not isinstance(column, Column)
+                or not _needs_value(column)
+                or any(column is other for other in written)
+            ):
+                continue
+            warnings.warn(
+                f"The column {column.table.name}.{column.name} needs a value, "
+                f"but the mapping of {self.model.__name__} never writes it: "
+                "map it, or give it a default",
+                stacklevel=3,
+            )
 
     def schemas(self) -> list[Schema]:
         """Return the schemas of the resources, restricted to what the mapping stores.
 
         They hold the mapped attributes only. An attribute the mapping reads
-        but never writes is ``readOnly``. An attribute whose column cannot be
-        ``NULL`` and has no default is ``required``, unless it is write-only.
-        Publish them, rather than the
+        but never writes is ``readOnly``, and an attribute it writes but never
+        reads is ``writeOnly``. An attribute whose column cannot be ``NULL``
+        and has no default is ``required``, unless it is write-only. A column
+        with a default that cannot be ``NULL`` leaves its attribute optional,
+        but its value cannot be removed. Publish them, rather than the
         schemas of :attr:`model`, so that clients know what the server stores:
         build the provider of the server with
         :meth:`ScimProvider.from_discovery <scim2_models.ScimProvider.from_discovery>`,
@@ -552,25 +625,44 @@ class ResourceMapping:
                 sub_attribute.mutability != Mutability.read_only
                 for sub_attribute in sub_attributes
             )
-            required = any(
-                self._needs_value(f"{urn}.{sub_attribute.name}", entries=False)
+            required = attribute.required
+            if any(
+                self._always_needs(f"{urn}.{sub_attribute.name}", entries=False)
                 for sub_attribute in sub_attributes
-            )
+            ):
+                required = Required.true
+            mutability = attribute.mutability if written else Mutability.read_only
+            returned = attribute.returned
+            if all(sub.returned == Returned.never for sub in sub_attributes):
+                returned = Returned.never
+                required = Required.false
+                if mutability == Mutability.read_write:
+                    mutability = Mutability.write_only
             return attribute.model_copy(
                 update={
                     "sub_attributes": sub_attributes,
-                    "mutability": attribute.mutability
-                    if written
-                    else Mutability.read_only,
-                    "required": Required.true if required else attribute.required,
+                    "mutability": mutability,
+                    "required": required,
+                    "returned": returned,
                 }
             )
 
         storage = self._storage(urn)
         if storage is None:
             return None
-        if self._needs_value(urn):
+        if self._always_needs(urn):
             return attribute.model_copy(update={"required": Required.true})
+        if storage == _Storage.written and not self._readable(urn):
+            mutability = attribute.mutability
+            if mutability != Mutability.immutable:
+                mutability = Mutability.write_only
+            return attribute.model_copy(
+                update={
+                    "mutability": mutability,
+                    "returned": Returned.never,
+                    "required": Required.false,
+                }
+            )
         if storage in (_Storage.written, _Storage.link_type):
             return attribute
         if storage == _Storage.ref:
@@ -601,6 +693,15 @@ class ResourceMapping:
                     return _Storage.written if column.writable else _Storage.read_only
         return None
 
+    def _readable(self, urn: str) -> bool:
+        """Tell whether the storage reads the column of an attribute, True for an attribute without column."""
+        key = urn.lower()
+        return all(
+            column.readable
+            for column in self._columns.values()
+            if column.binding.urn.lower() == key
+        )
+
     def _nullable(self, urn: str) -> bool:
         """Tell whether the column of an attribute can hold no value, True for an attribute without column."""
         key = urn.lower()
@@ -619,7 +720,7 @@ class ResourceMapping:
             if column.binding.urn.lower() == key
         )
 
-    def _needs_value(self, urn: str, *, entries: bool = True) -> bool:
+    def _always_needs(self, urn: str, *, entries: bool = True) -> bool:
         """Tell whether a resource, or an entry when entries is True, always needs a value for an attribute.
 
         This holds for a column that needs a value, and that the storage writes
@@ -892,9 +993,7 @@ class ResourceMapping:
             )
 
         columns = collection.columns.values()
-        if not all(
-            column.readable and not _write_only(column.binding) for column in columns
-        ):
+        if not all(column.readable for column in columns):
             raise ValueError(
                 f"Writing {path!r} replaces its entries, "
                 "so they cannot hold write-only values"
@@ -932,6 +1031,26 @@ class ResourceMapping:
         for link in links:
             collection = self._collection(path, binding, link.relationship)
             collection.resource_type = link.resource_type
+            relationship = collection.relationship_property
+            if (
+                relationship.direction is MANYTOONE
+                and collection.writable
+                and not self._always_held(binding)
+                and any(not column.nullable for column in relationship.local_columns)
+            ):
+                raise ValueError(
+                    f"{path!r} can be removed, so the foreign key of its "
+                    "relationship must accept NULL"
+                )
+            if (
+                relationship.direction is ONETOMANY
+                and collection.writable
+                and any(not column.nullable for column in relationship.remote_side)
+            ):
+                raise ValueError(
+                    f"Removing a link of {path!r} writes NULL in the foreign key "
+                    "of the linked record, so it must accept NULL"
+                )
             if link.type is not None:
                 collection.link_type = link.type
                 collection.type_column = _Column(
@@ -964,12 +1083,6 @@ class ResourceMapping:
             raise ValueError(
                 f"{path!r} must be mapped to a column or a hybrid property"
             )
-        if attribute.readable and isinstance(getattr(expression, "type", None), Hashed):
-            raise ValueError(
-                f"{path!r} stores a hash, which the storage cannot read back: "
-                "map it with readable=False"
-            )
-
         writable = attribute.writable
         descriptor = inspect(expression.class_).all_orm_descriptors[key]
         mutabilities = {
@@ -980,7 +1093,29 @@ class ResourceMapping:
             isinstance(descriptor, hybrid_property) and descriptor.fset is None
         ):
             writable = False
-        column = _Column(binding, expression, key, attribute.readable, writable)
+        # The models check an immutable value against the stored one, so the
+        # storage reads it, even when clients never do.
+        hidden = Mutability.write_only in mutabilities or (
+            Mutability.immutable not in mutabilities
+            and Returned.never
+            in (
+                binding.model.get_field_annotation(binding.field_name, Returned),
+                binding.get_annotation(Returned),
+            )
+        )
+        readable = attribute.readable and not hidden
+        if not readable and not writable:
+            raise ValueError(
+                f"{path!r} would be neither read nor written: check its "
+                "readable and writable flags, the setter of its property and "
+                "the mutability of its schema, or leave it out"
+            )
+        if readable and isinstance(getattr(expression, "type", None), Hashed):
+            raise ValueError(
+                f"{path!r} stores a hash, which the storage cannot read back: "
+                "map it to a write-only attribute, or with readable=False"
+            )
+        column = _Column(binding, expression, key, readable, writable)
         python_type = _python_type(expression)
         if (
             column.is_string
