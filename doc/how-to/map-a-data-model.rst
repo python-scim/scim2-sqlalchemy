@@ -56,6 +56,12 @@ A path to a complex attribute alone, such as ``name``, raises a :class:`ValueErr
 the attributes the model has no column for: the storage refuses a value for them. To keep
 clients from sending such values, read :doc:`publish-the-stored-attributes`.
 
+A new resource needs a value for each column that cannot be ``NULL`` and has no default. The
+storage refuses a resource without this value with a 400 error. It also refuses an entry of a
+:class:`~scim2_sqlalchemy.Many` without this value. The storage does not see the values the application sets
+itself, such as in the constructor of the model or in a ``before_insert`` event. Declare such a
+value as the ``default`` or the ``server_default`` of the column.
+
 Map an extension
 ----------------
 
