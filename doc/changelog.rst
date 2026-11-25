@@ -1,6 +1,15 @@
 Changelog
 =========
 
+[Unreleased]
+------------
+
+Added
+^^^^^
+- :meth:`~scim2_sqlalchemy.ResourceMapping.schemas` marks as ``required`` an attribute whose column
+  cannot be ``NULL`` and has no default, so that clients know which values a new resource needs.
+  A write-only attribute stays optional, since a replacement may leave it out.
+
 [0.2.0] - 2026-11-24
 --------------------
 

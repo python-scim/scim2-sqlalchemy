@@ -7,6 +7,7 @@ from scim2_models import ComplexAttribute
 from scim2_models import Extension
 from scim2_models import Mutability
 from scim2_models import MutabilityException
+from scim2_models import Required
 from scim2_models import SearchRequest
 from scim2_models import User
 from sqlalchemy import ForeignKey
@@ -53,6 +54,9 @@ class TaggedUser(Base):
     tags: Mapped[list["Tag"]] = relationship(
         cascade="all, delete-orphan", order_by="Tag.id"
     )
+    labels: Mapped[list["Label"]] = relationship(
+        cascade="all, delete-orphan", order_by="Label.id"
+    )
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -63,6 +67,16 @@ class Tag(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tagged_users.id"))
     value: Mapped[str | None]
+
+
+class Label(Base):
+    """A value of a list, whose column cannot be NULL."""
+
+    __tablename__ = "labels"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tagged_users.id"))
+    value: Mapped[str]
 
 
 def tagged_mapping(tags=Tag.value, **changes):
@@ -197,6 +211,15 @@ def test_the_schema_keeps_the_values():
     (attribute,) = extension.attributes
     assert (attribute.name, attribute.multi_valued) == ("tags", True)
     assert attribute.mutability == Mutability.read_write
+
+
+def test_values_whose_column_cannot_be_null_are_not_required():
+    """Each value needs its column, but a resource may have no value."""
+    mapping = tagged_mapping(**{f"{TAGGED}:tags": Many(TaggedUser.labels, Label.value)})
+    _, extension = mapping.schemas()
+
+    (attribute,) = extension.attributes
+    assert attribute.required == Required.false
 
 
 def test_read_only_values_are_not_written(factory, user_type):

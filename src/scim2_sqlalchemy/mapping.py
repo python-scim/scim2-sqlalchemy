@@ -13,6 +13,7 @@ from scim2_models import Attribute as SchemaAttribute
 from scim2_models import AttributeBinding
 from scim2_models import Mutability
 from scim2_models import Path
+from scim2_models import Required
 from scim2_models import Resource
 from scim2_models import ResponseParameters
 from scim2_models import Schema
@@ -507,8 +508,10 @@ class ResourceMapping:
     def schemas(self) -> list[Schema]:
         """Return the schemas of the resources, restricted to what the mapping stores.
 
-        They hold the mapped attributes only, and an attribute the mapping
-        reads but never writes is ``readOnly``. Publish them, rather than the
+        They hold the mapped attributes only. An attribute the mapping reads
+        but never writes is ``readOnly``. An attribute whose column cannot be
+        ``NULL`` and has no default is ``required``, unless it is write-only.
+        Publish them, rather than the
         schemas of :attr:`model`, so that clients know what the server stores:
         build the provider of the server with
         :meth:`ScimProvider.from_discovery <scim2_models.ScimProvider.from_discovery>`,
@@ -549,18 +552,25 @@ class ResourceMapping:
                 sub_attribute.mutability != Mutability.read_only
                 for sub_attribute in sub_attributes
             )
+            required = any(
+                self._needs_value(f"{urn}.{sub_attribute.name}", entries=False)
+                for sub_attribute in sub_attributes
+            )
             return attribute.model_copy(
                 update={
                     "sub_attributes": sub_attributes,
                     "mutability": attribute.mutability
                     if written
                     else Mutability.read_only,
+                    "required": Required.true if required else attribute.required,
                 }
             )
 
         storage = self._storage(urn)
         if storage is None:
             return None
+        if self._needs_value(urn):
+            return attribute.model_copy(update={"required": Required.true})
         if storage in (_Storage.written, _Storage.link_type):
             return attribute
         if storage == _Storage.ref:
@@ -606,6 +616,28 @@ class ResourceMapping:
         return any(
             column.required
             for column in self._columns.values()
+            if column.binding.urn.lower() == key
+        )
+
+    def _needs_value(self, urn: str, *, entries: bool = True) -> bool:
+        """Tell whether a resource, or an entry when entries is True, always needs a value for an attribute.
+
+        This holds for a column that needs a value, and that the storage writes
+        and reads. A write-only value is kept when a replacement leaves it out,
+        so a replacement does not need it.
+        """
+        key = urn.lower()
+        columns = list(self._columns.values())
+        if entries:
+            columns += [
+                column
+                for collection in self._all_collections()
+                if collection.owned and not collection.simple
+                for column in collection.columns.values()
+            ]
+        return any(
+            column.required and column.writable and column.readable
+            for column in columns
             if column.binding.urn.lower() == key
         )
 

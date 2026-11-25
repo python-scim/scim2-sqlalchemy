@@ -51,6 +51,15 @@ holds the mapped attributes only, and an attribute the mapping only reads is ``r
    >>> [(attribute.name, attribute.mutability.value) for attribute in USERS.schemas()[0].attributes]
    [('userName', 'readWrite'), ('name', 'readWrite'), ('displayName', 'readOnly'), ('active', 'readWrite'), ('password', 'writeOnly'), ('emails', 'readWrite'), ('groups', 'readOnly')]
 
+An attribute whose column cannot be ``NULL`` and has no default is ``required``, so that clients
+know which values a new resource needs. A write-only attribute stays optional in the schema, since
+the storage keeps its value when a replacement leaves it out. A new resource still needs it.
+
+A required attribute of an extension only applies to a resource that holds the extension. When a
+column of an extension needs a value, declare the extension required on the model, such as
+``User[Annotated[EnterpriseUser, Required.true]]``. The resource type that
+:meth:`~scim2_models.ResourceType.from_resource` builds then marks the extension as required.
+
 Pass the provider to the storage too. The storage then returns resources of the models of the
 provider, and gives the links a ``$ref``:
 

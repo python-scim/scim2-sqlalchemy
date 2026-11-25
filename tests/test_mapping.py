@@ -8,6 +8,7 @@ from scim2_models import EnterpriseUser
 from scim2_models import Extension
 from scim2_models import Group
 from scim2_models import Mutability
+from scim2_models import Required
 from scim2_models import User
 from sqlalchemy import ForeignKey
 from sqlalchemy import String
@@ -29,6 +30,7 @@ from scim2_sqlalchemy.query import _as_key
 
 from .models import ENTERPRISE
 from .models import TYPES
+from .models import CertificateRecord
 from .models import EmailRecord
 from .models import GroupRecord
 from .models import UserRecord
@@ -428,6 +430,72 @@ def test_an_attribute_the_mapping_only_reads_is_published_read_only():
 
     (locale,) = [a for a in user.attributes if a.name == "locale"]
     assert locale.mutability == Mutability.read_only
+
+
+def test_an_attribute_whose_column_needs_a_value_is_published_required():
+    """A written attribute is required when its column cannot be NULL and has no default."""
+    mapping = users_mapping(
+        {
+            "nickName": UserRecord.user_name,
+            "profileUrl": UserRecord.profile_url,
+            "title": Attribute(UserRecord.user_name, writable=False),
+            f"{ENTERPRISE}:employeeNumber": UserRecord.user_name,
+        }
+    )
+    (user, enterprise) = mapping.schemas()
+
+    required = {a.name: a.required for a in user.attributes}
+    assert required["nickName"] == Required.true
+    assert required["profileUrl"] == Required.false
+    assert required["title"] == Required.false
+    (employee_number, _) = enterprise.attributes
+    assert employee_number.required == Required.true
+
+
+def test_a_write_only_attribute_is_not_published_required():
+    """A replacement may leave out a write-only value, which the storage keeps."""
+    password = Attribute(UserRecord.user_name, readable=False)
+    (user, _) = users_mapping({"password": password}).schemas()
+
+    (attribute,) = [a for a in user.attributes if a.name == "password"]
+    assert attribute.required == Required.false
+
+
+def test_a_complex_attribute_whose_sub_attribute_needs_a_value_is_published_required():
+    """A new resource without name has no givenName, so name is required with it."""
+    (user, _) = users_mapping({"name.givenName": UserRecord.user_name}).schemas()
+
+    (name,) = [a for a in user.attributes if a.name == "name"]
+    assert name.required == Required.true
+    assert {sub.name: sub.required for sub in name.sub_attributes} == {
+        "familyName": Required.false,
+        "givenName": Required.true,
+    }
+
+
+def test_a_complex_attribute_with_a_read_only_sub_attribute_is_not_required():
+    """The storage never writes a read-only givenName, so a new resource needs no name."""
+    given_name = Attribute(UserRecord.user_name, writable=False)
+    (user, _) = users_mapping({"name.givenName": given_name}).schemas()
+
+    (name,) = [a for a in user.attributes if a.name == "name"]
+    assert name.required == Required.false
+
+
+def test_an_entry_whose_column_needs_a_value_is_published_required():
+    """Each certificate needs a value, but a user may have no certificate."""
+    certificates = Many(
+        UserRecord.certificates,
+        {"value": CertificateRecord.value, "type": CertificateRecord.type},
+    )
+    (user, _) = users_mapping({"x509Certificates": certificates}).schemas()
+
+    (attribute,) = [a for a in user.attributes if a.name == "x509Certificates"]
+    assert attribute.required == Required.false
+    assert {sub.name: sub.required for sub in attribute.sub_attributes} == {
+        "value": Required.true,
+        "type": Required.false,
+    }
 
 
 def test_a_link_publishes_its_value_its_ref_its_type_and_a_read_only_display():
