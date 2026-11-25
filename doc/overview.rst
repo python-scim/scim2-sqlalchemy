@@ -71,7 +71,7 @@ Each value of the mapping says how the attribute is stored:
 - ``displayName`` is a :class:`~sqlalchemy.ext.hybrid.hybrid_property` without setter: the storage reads it, filters and
   sorts on it, and never writes it.
 - ``password`` is a property whose setter hashes the password. The schema makes it write-only:
-  the storage writes it, and never reads it back.
+  the storage reads the hash back, and the server never shows it to clients.
 - ``emails`` is a :class:`~scim2_sqlalchemy.Many`: the email addresses belong to the account,
   and writing the user replaces them.
 - ``groups`` is a :class:`~scim2_sqlalchemy.Link`: the teams are other resources, of the

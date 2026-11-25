@@ -5,6 +5,7 @@ from typing import Annotated
 import pytest
 from scim2_models import URN
 from scim2_models import ComplexAttribute
+from scim2_models import Email
 from scim2_models import EnterpriseUser
 from scim2_models import Extension
 from scim2_models import Group
@@ -14,6 +15,7 @@ from scim2_models import Required
 from scim2_models import Resource
 from scim2_models import Returned
 from scim2_models import User
+from sqlalchemy import Computed
 from sqlalchemy import ForeignKey
 from sqlalchemy import String
 from sqlalchemy import cast
@@ -98,6 +100,7 @@ class Person(Base):
     unknown: Mapped[str | None] = mapped_column(Unknown())
     label: Mapped[str | None] = mapped_column(LabelType())
     secret: Mapped[str | None] = mapped_column(Hashed(str.upper))
+    shout: Mapped[str | None] = mapped_column(String, Computed("upper(user_name)"))
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -182,7 +185,7 @@ def test_an_identifier_that_can_be_missing_is_refused():
 
 
 def test_a_hash_holds_a_write_only_attribute_only():
-    """The schema makes password write-only, so its hash needs no readable=False, unlike nickName."""
+    """The schema makes password write-only, so clients never read its hash, unlike the one of nickName."""
     person_mapping(password=Person.secret)
 
     with pytest.raises(ValueError, match="'nickName' stores a hash"):
@@ -192,10 +195,10 @@ def test_a_hash_holds_a_write_only_attribute_only():
 @pytest.mark.parametrize(
     "path, value",
     [
-        ("title", Attribute(UserRecord.title, readable=False, writable=False)),
+        ("password", Attribute(UserRecord.title, writable=False)),
         ("password", UserRecord.lower_name),
     ],
-    ids=["Attribute", "write-only property without setter"],
+    ids=["read-only Attribute", "property without setter"],
 )
 def test_an_attribute_neither_read_nor_written_is_refused(path, value):
     """The storage would do nothing with it, yet publish it."""
@@ -439,17 +442,26 @@ class Secret(ComplexAttribute):
     value: Annotated[str | None, Mutability.write_only] = None
 
 
+class Plaque(ComplexAttribute):
+    serial: Annotated[str | None, Mutability.immutable, Returned.never] = None
+
+
 class Secrets(Extension):
     __schema__ = URN(SECRET)
 
     secrets: list[Secret] | None = None
+    plaques: list[Plaque] | None = None
     codes: Annotated[list[str] | None, Mutability.write_only] = None
 
 
 @pytest.mark.parametrize(
     ("path", "attributes"),
-    [("secrets", {"value": EmailRecord.value}), ("codes", EmailRecord.value)],
-    ids=["sub-attribute", "attribute"],
+    [
+        ("secrets", {"value": EmailRecord.value}),
+        ("codes", EmailRecord.value),
+        ("plaques", {"serial": EmailRecord.value}),
+    ],
+    ids=["sub-attribute", "attribute", "never returned"],
 )
 def test_entries_the_schema_makes_write_only_are_refused(path, attributes):
     """A client never reads them back, so a write would lose them."""
@@ -524,38 +536,41 @@ def test_two_paths_to_the_same_attribute_are_refused(changes, message):
         users_mapping(changes)
 
 
-@pytest.mark.parametrize(
-    "emails, message",
-    [
-        (
+class SecretEmail(Email):
+    type: Annotated[str | None, Mutability.write_only] = None
+
+
+class SecretUser(User):
+    emails: list[SecretEmail] | None = None
+
+
+def test_the_entries_of_a_many_cannot_hold_write_only_values():
+    """Writing the emails creates their records again, which would hash a hash read back again."""
+    emails = Many(
+        UserRecord.emails, {"value": EmailRecord.value, "type": EmailRecord.type}
+    )
+    with pytest.raises(ValueError, match="cannot hold write-only values"):
+        ResourceMapping(
+            SecretUser,
+            UserRecord,
             {
-                "value": EmailRecord.value,
-                "type": Attribute(EmailRecord.type, readable=False),
+                "id": UserRecord.id,
+                "userName": UserRecord.user_name,
+                "emails": emails,
+                "meta.created": UserRecord.created,
+                "meta.lastModified": UserRecord.last_modified,
             },
-            "cannot hold write-only values",
-        ),
-        (
-            {
-                "value": Attribute(EmailRecord.value, readable=False),
-                "type": Attribute(EmailRecord.type, readable=False),
-            },
-            "cannot hold write-only values",
-        ),
-        (
-            {
-                "value": EmailRecord.value,
-                "display": Attribute(EmailRecord.value, writable=False),
-            },
-            "all written or all read-only",
-        ),
-    ],
-    ids=["write-only", "all write-only", "read-only"],
-)
-def test_the_entries_of_a_many_are_read_and_written_alike(emails, message):
-    """Writing the emails replaces them, which would lose a value the client never sends back."""
-    with pytest.raises(
-        ValueError, match=f"Writing 'emails' replaces its entries, so .* {message}"
-    ):
+            version=UserRecord.version,
+        )
+
+
+def test_the_entries_of_a_many_are_all_written_or_all_read_only():
+    """Writing the emails replaces them, which would drop a read-only display."""
+    emails = {
+        "value": EmailRecord.value,
+        "display": Attribute(EmailRecord.value, writable=False),
+    }
+    with pytest.raises(ValueError, match="all written or all read-only"):
         users_mapping({"emails": Many(UserRecord.emails, emails)})
 
 
@@ -749,14 +764,9 @@ def test_an_attribute_whose_column_needs_a_value_is_published_required():
     assert employee_number.required == Required.true
 
 
-@pytest.mark.parametrize(
-    "password",
-    [Attribute(UserRecord.user_name, readable=False), UserRecord.user_name],
-    ids=["readable=False", "writeOnly in the schema"],
-)
-def test_a_write_only_attribute_is_not_published_required(password):
+def test_a_write_only_attribute_is_not_published_required():
     """A replacement may leave out a write-only value, which the storage keeps."""
-    (user, _) = users_mapping({"password": password}).schemas()
+    (user, _) = users_mapping({"password": UserRecord.user_name}).schemas()
 
     (attribute,) = [a for a in user.attributes if a.name == "password"]
     assert attribute.required == Required.false
@@ -766,7 +776,16 @@ HIDDEN = "urn:example:params:scim:schemas:extension:hidden:2.0:User"
 
 
 class Card(ComplexAttribute):
-    number: str | None = None
+    number: Annotated[str | None, Returned.never] = None
+
+
+class Plate(ComplexAttribute):
+    serial: Annotated[str | None, Mutability.immutable, Returned.never] = None
+    label: str | None = None
+
+
+class Cert(ComplexAttribute):
+    secret: Annotated[str | None, Mutability.write_only] = None
 
 
 class Hidden(Extension):
@@ -775,11 +794,15 @@ class Hidden(Extension):
     token: Annotated[str | None, Returned.never] = None
     badge: Annotated[str | None, Mutability.immutable, Required.true] = None
     card: Annotated[Card | None, Mutability.immutable, Required.true] = None
-    serial: Annotated[str | None, Mutability.immutable, Returned.never] = None
+    plate: Plate | None = None
+    cert: Annotated[Cert | None, Mutability.immutable] = None
+    serial: Annotated[
+        str | None, Mutability.immutable, Returned.never, Required.true
+    ] = None
 
 
-def test_an_attribute_never_returned_is_write_only():
-    """A client never reads the token back, so the storage neither reads it nor requires it."""
+def test_an_attribute_never_returned_is_concealed():
+    """A client never reads the token back, so it is not required, though the storage reads it."""
     mapping = ResourceMapping(
         User[Hidden],
         UserRecord,
@@ -795,45 +818,83 @@ def test_an_attribute_never_returned_is_write_only():
     (_, hidden) = mapping.schemas()
 
     (token,) = hidden.attributes
-    assert token.required == Required.false
-    assert not mapping._column(f"{HIDDEN}:token").readable
+    assert (token.mutability, token.returned, token.required) == (
+        Mutability.write_only,
+        Returned.never,
+        Required.false,
+    )
+    assert mapping._column(f"{HIDDEN}:token").concealed
+
+
+def hidden_mapping(path, value):
+    return ResourceMapping(
+        User[Hidden],
+        UserRecord,
+        {
+            "id": UserRecord.id,
+            "userName": UserRecord.user_name,
+            f"{HIDDEN}:{path}": value,
+            "meta.created": UserRecord.created,
+            "meta.lastModified": UserRecord.last_modified,
+        },
+        version=UserRecord.version,
+    )
 
 
 @pytest.mark.parametrize(
-    "family_name, expected",
+    "label, expected",
     [
-        (
-            Attribute(UserRecord.family_name, readable=False),
-            (Mutability.write_only, Returned.never),
-        ),
-        (UserRecord.family_name, (Mutability.read_write, Returned.default)),
+        (None, (Mutability.write_only, Returned.never)),
+        (UserRecord.title, (Mutability.read_write, Returned.default)),
     ],
     ids=["no sub-attribute returned", "one sub-attribute returned"],
 )
 def test_a_complex_attribute_is_returned_when_one_of_its_sub_attributes_is(
-    family_name, expected
+    label, expected
 ):
-    """A name whose parts are never returned is never returned either."""
-    given_name = Attribute(UserRecord.given_name, readable=False)
-    mapping = users_mapping(
-        {"name.givenName": given_name, "name.familyName": family_name}
+    """A plate whose stored parts are never returned is never returned either."""
+    attributes = {
+        "id": UserRecord.id,
+        "userName": UserRecord.user_name,
+        f"{HIDDEN}:plate.serial": UserRecord.user_name,
+        "meta.created": UserRecord.created,
+        "meta.lastModified": UserRecord.last_modified,
+    }
+    if label is not None:
+        attributes[f"{HIDDEN}:plate.label"] = label
+    mapping = ResourceMapping(
+        User[Hidden], UserRecord, attributes, version=UserRecord.version
     )
-    (user, _) = mapping.schemas()
+    (_, hidden) = mapping.schemas()
 
-    (name,) = [a for a in user.attributes if a.name == "name"]
-    assert (name.mutability, name.returned) == expected
+    (plate,) = hidden.attributes
+    assert (plate.mutability, plate.returned) == expected
 
 
-@pytest.mark.parametrize("path", ["badge", "card.number"])
-def test_an_immutable_attribute_the_mapping_only_writes_stays_immutable(path):
-    """A client still sets the badge or the card once, and never reads it back."""
+@pytest.mark.parametrize("path", ["serial", "card.number"])
+def test_an_immutable_attribute_never_returned_is_published_optional(path):
+    """Clients never read the serial or the card back, so a replacement cannot carry them."""
+    (_, hidden) = hidden_mapping(path, UserRecord.user_name).schemas()
+
+    (attribute,) = hidden.attributes
+    for published in (attribute, *(attribute.sub_attributes or [])):
+        assert (published.mutability, published.returned, published.required) == (
+            Mutability.immutable,
+            Returned.never,
+            Required.false,
+        )
+
+
+def test_a_value_clients_never_read_makes_no_complex_attribute_required():
+    """The serial of a plate needs a value, but clients never read it back."""
     mapping = ResourceMapping(
         User[Hidden],
         UserRecord,
         {
             "id": UserRecord.id,
             "userName": UserRecord.user_name,
-            f"{HIDDEN}:{path}": Attribute(UserRecord.title, readable=False),
+            f"{HIDDEN}:plate.serial": UserRecord.user_name,
+            f"{HIDDEN}:plate.label": UserRecord.title,
             "meta.created": UserRecord.created,
             "meta.lastModified": UserRecord.last_modified,
         },
@@ -841,30 +902,84 @@ def test_an_immutable_attribute_the_mapping_only_writes_stays_immutable(path):
     )
     (_, hidden) = mapping.schemas()
 
-    (attribute,) = hidden.attributes
-    assert (attribute.mutability, attribute.returned, attribute.required) == (
-        Mutability.immutable,
-        Returned.never,
-        Required.false,
+    (plate,) = hidden.attributes
+    assert plate.required == Required.false
+    assert mapping._column(f"{HIDDEN}:plate.serial").concealed
+
+
+def test_a_write_only_value_of_an_immutable_attribute_can_change():
+    """The schema makes the secret write-only, which wins over the immutable certificate."""
+    column = hidden_mapping("cert.secret", UserRecord.title)._column(
+        f"{HIDDEN}:cert.secret"
     )
 
+    assert column.concealed
+    assert not column.immutable
 
-def test_an_immutable_value_never_returned_is_still_read():
-    """The models check that the serial never changes against the stored one."""
+
+def test_an_attribute_clients_never_read_nor_the_storage_writes_is_refused():
+    """A client could neither read the serial back nor change it."""
+    with pytest.raises(ValueError, match="neither read nor written"):
+        hidden_mapping("serial", Attribute(UserRecord.title, writable=False))
+
+
+class SecretGroup(Group):
+    display_name: Annotated[str | None, Mutability.immutable, Returned.never] = None
+
+
+def test_a_link_never_displays_a_name_clients_never_read():
+    """The members of a group never show the display name of a group that hides it."""
     mapping = ResourceMapping(
-        User[Hidden],
-        UserRecord,
+        SecretGroup,
+        GroupRecord,
         {
-            "id": UserRecord.id,
-            "userName": UserRecord.user_name,
-            f"{HIDDEN}:serial": UserRecord.title,
-            "meta.created": UserRecord.created,
-            "meta.lastModified": UserRecord.last_modified,
+            "id": GroupRecord.id,
+            "displayName": GroupRecord.display_name,
+            "meta.created": GroupRecord.created,
+            "meta.lastModified": GroupRecord.last_modified,
         },
-        version=UserRecord.version,
+        version=GroupRecord.version,
     )
 
-    assert mapping._column(f"{HIDDEN}:serial").readable
+    assert mapping._display() is None
+
+
+def test_an_immutable_attribute_clients_read_cannot_be_hashed():
+    """Clients would read the hash of the badge."""
+    with pytest.raises(ValueError, match="badge' stores a hash"):
+        ResourceMapping(
+            User[Hidden],
+            Person,
+            REQUIRED | {f"{HIDDEN}:badge": Person.secret},
+            version=Person.version,
+        )
+
+
+def test_an_immutable_attribute_clients_never_read_cannot_be_hashed():
+    """A client sending its serial again would get a 400, since the serial never matches its hash."""
+    with pytest.raises(ValueError, match="serial' is immutable, so a client"):
+        ResourceMapping(
+            User[Hidden],
+            Person,
+            REQUIRED | {f"{HIDDEN}:serial": Person.secret},
+            version=Person.version,
+        )
+
+
+def test_a_computed_column_is_published_read_only():
+    """The database computes the column, so the storage never writes it."""
+    mapping = person_mapping(nickName=Person.shout)
+    (user,) = mapping.schemas()
+
+    (nick_name,) = [a for a in user.attributes if a.name == "nickName"]
+    assert nick_name.mutability == Mutability.read_only
+    assert not mapping._column("nickName").writable
+
+
+def test_a_computed_column_cannot_hold_a_value_clients_never_read():
+    """A client could neither read the password back nor set it."""
+    with pytest.raises(ValueError, match="neither read nor written"):
+        person_mapping(password=Person.shout)
 
 
 def test_a_complex_attribute_whose_sub_attribute_needs_a_value_is_published_required():
@@ -902,16 +1017,6 @@ def test_an_entry_whose_column_needs_a_value_is_published_required():
         "value": Required.true,
         "type": Required.false,
     }
-
-
-def test_an_attribute_the_mapping_only_writes_is_published_write_only():
-    """The storage never returns the title, so clients cannot read it back."""
-    title = Attribute(UserRecord.title, readable=False)
-    (user, _) = users_mapping({"title": title}).schemas()
-
-    (attribute,) = [a for a in user.attributes if a.name == "title"]
-    assert attribute.mutability == Mutability.write_only
-    assert attribute.returned == Returned.never
 
 
 def test_a_link_publishes_its_value_its_ref_its_type_and_a_read_only_display():

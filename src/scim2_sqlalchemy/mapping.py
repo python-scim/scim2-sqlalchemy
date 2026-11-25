@@ -132,6 +132,18 @@ def _needs_value(column: Column[Any]) -> bool:
     )
 
 
+def _conceals(binding: AttributeBinding) -> bool:
+    """Whether clients never read an attribute back: its schema, or the one of the attribute holding it, makes it writeOnly or never returns it."""
+    model, field_name = binding.model, binding.field_name
+    return Mutability.write_only in (
+        model.get_field_annotation(field_name, Mutability),
+        binding.get_annotation(Mutability),
+    ) or Returned.never in (
+        model.get_field_annotation(field_name, Returned),
+        binding.get_annotation(Returned),
+    )
+
+
 def _python_type(expression: Any) -> type | None:
     """Return the Python type of the values of an expression, or None if its type tells none.
 
@@ -163,7 +175,7 @@ def _overlap(
 
 
 class Attribute:
-    """A column holding a SCIM attribute that the storage only reads, or only writes.
+    """A column holding a SCIM attribute, whose writing can be turned off.
 
     To store a value in another form, map the attribute to a
     :class:`~sqlalchemy.ext.hybrid.hybrid_property` that converts it, in Python
@@ -171,20 +183,12 @@ class Attribute:
 
     :param expression: The column, or the
         :class:`~sqlalchemy.ext.hybrid.hybrid_property`, holding the value.
-    :param readable: Whether the storage reads the attribute. When
-        :data:`False`, the attribute is write-only, such as a password: the
-        storage never returns it, nor filters or sorts on it. An attribute
-        that the schema makes ``writeOnly``, or never returns, is always
-        write-only.
     :param writable: Whether the storage writes the attribute. When
         :data:`False`, the attribute is read-only.
     """
 
-    def __init__(
-        self, expression: Any, *, readable: bool = True, writable: bool = True
-    ) -> None:
+    def __init__(self, expression: Any, *, writable: bool = True) -> None:
         self.expression = expression
-        self.readable = readable
         self.writable = writable
 
 
@@ -192,7 +196,10 @@ class Hashed(TypeDecorator[str]):
     """A column type storing the hash of a string, such as a password.
 
     The column stores what the hash function returns for the value written.
-    Map it to a write-only attribute, since the storage cannot read a hash back.
+    Map it to an attribute that the schema makes ``writeOnly``, such as
+    ``password``, or never returns. The storage reads the hash back, and
+    clients never see it. A replacement without the value gives the hash back
+    to the storage, which keeps it as it is.
 
     :param hash_value: The function hashing a value.
     :param length: The length of the column. Without it, MariaDB stores a TEXT.
@@ -228,9 +235,9 @@ class Many:
     order of the entries. Without it, the order is the one the database
     returns. A sort uses the ``primary`` entry, or else the first one.
 
-    Since writing replaces the entries, their columns are all readable: a
-    client never sends back a write-only value, so a write would lose it.
-    Their columns are also either all written or none.
+    Since writing replaces the entries, they cannot hold values that clients
+    never read back, such as write-only values. Their columns are also either
+    all written or none.
 
     The entries of a multi-valued simple attribute, such as a list of strings,
     are the values of one column of the child table. The storage keeps their
@@ -294,15 +301,17 @@ class _Column:
     """A SCIM attribute stored in a column or a hybrid property.
 
     textual tells whether filters compare the column as text, as they do for
-    an integer identifier.
+    an integer identifier. concealed tells whether clients never read the
+    value back, and immutable whether the schema keeps it from changing.
     """
 
     binding: AttributeBinding
     expression: ColumnElement[Any]
     key: str
-    readable: bool
     writable: bool
     textual: bool = False
+    concealed: bool = False
+    immutable: bool = False
 
     @property
     def is_string(self) -> bool:
@@ -459,10 +468,10 @@ class ResourceMapping:
         does: adding a member to a group leaves the version of the user as it is.
     :raises ValueError: When a path is not valid for the model, when a
         value does not fit the attribute of its path, or when ``id`` is mapped
-        to a column that can hold ``NULL``. Also when the storage would neither
-        read nor write an attribute, when a readable attribute is mapped to a
-        :class:`Hashed` column, or when removing a :class:`Link` would write
-        ``NULL`` in a foreign key that refuses it.
+        to a column that can hold ``NULL``. Also when clients could neither
+        read nor write an attribute, when an attribute clients read, or an
+        immutable one, is mapped to a :class:`Hashed` column, or when removing
+        a :class:`Link` would write ``NULL`` in a foreign key that refuses it.
 
     The mapping warns about a column that needs a value but that the storage
     never writes.
@@ -650,12 +659,11 @@ class ResourceMapping:
         storage = self._storage(urn)
         if storage is None:
             return None
-        if self._always_needs(urn):
-            return attribute.model_copy(update={"required": Required.true})
-        if storage == _Storage.written and not self._readable(urn):
-            mutability = attribute.mutability
-            if mutability != Mutability.immutable:
-                mutability = Mutability.write_only
+        columns = self._columns_of(urn, entries=True)
+        if storage == _Storage.written and any(c.concealed for c in columns):
+            mutability = Mutability.write_only
+            if any(c.immutable for c in columns):
+                mutability = Mutability.immutable
             return attribute.model_copy(
                 update={
                     "mutability": mutability,
@@ -663,6 +671,8 @@ class ResourceMapping:
                     "required": Required.false,
                 }
             )
+        if self._always_needs(urn):
+            return attribute.model_copy(update={"required": Required.true})
         if storage in (_Storage.written, _Storage.link_type):
             return attribute
         if storage == _Storage.ref:
@@ -693,40 +703,8 @@ class ResourceMapping:
                     return _Storage.written if column.writable else _Storage.read_only
         return None
 
-    def _readable(self, urn: str) -> bool:
-        """Tell whether the storage reads the column of an attribute, True for an attribute without column."""
-        key = urn.lower()
-        return all(
-            column.readable
-            for column in self._columns.values()
-            if column.binding.urn.lower() == key
-        )
-
-    def _nullable(self, urn: str) -> bool:
-        """Tell whether the column of an attribute can hold no value, True for an attribute without column."""
-        key = urn.lower()
-        return all(
-            column.nullable
-            for column in self._columns.values()
-            if column.binding.urn.lower() == key
-        )
-
-    def _required(self, urn: str) -> bool:
-        """Tell whether a new record needs a value for the column of an attribute."""
-        key = urn.lower()
-        return any(
-            column.required
-            for column in self._columns.values()
-            if column.binding.urn.lower() == key
-        )
-
-    def _always_needs(self, urn: str, *, entries: bool = True) -> bool:
-        """Tell whether a resource, or an entry when entries is True, always needs a value for an attribute.
-
-        This holds for a column that needs a value, and that the storage writes
-        and reads. A write-only value is kept when a replacement leaves it out,
-        so a replacement does not need it.
-        """
+    def _columns_of(self, urn: str, *, entries: bool) -> list[_Column]:
+        """Return the columns of an attribute, with the columns of the entries when entries is True."""
         key = urn.lower()
         columns = list(self._columns.values())
         if entries:
@@ -736,10 +714,26 @@ class ResourceMapping:
                 if collection.owned and not collection.simple
                 for column in collection.columns.values()
             ]
+        return [column for column in columns if column.binding.urn.lower() == key]
+
+    def _nullable(self, urn: str) -> bool:
+        """Tell whether the column of an attribute can hold no value, True for an attribute without column."""
+        return all(c.nullable for c in self._columns_of(urn, entries=False))
+
+    def _required(self, urn: str) -> bool:
+        """Tell whether a new record needs a value for the column of an attribute."""
+        return any(c.required for c in self._columns_of(urn, entries=False))
+
+    def _always_needs(self, urn: str, *, entries: bool = True) -> bool:
+        """Tell whether a resource, or an entry when entries is True, always needs a value for an attribute.
+
+        This holds for a column that needs a value, that the storage writes, and
+        that clients read back. A concealed value is kept when a replacement
+        leaves it out, so a replacement does not need it.
+        """
         return any(
-            column.required and column.writable and column.readable
-            for column in columns
-            if column.binding.urn.lower() == key
+            column.required and column.writable and not column.concealed
+            for column in self._columns_of(urn, entries=entries)
         )
 
     def _linked_resource_types(self, urn: str) -> list[str]:
@@ -802,9 +796,9 @@ class ResourceMapping:
                 yield collection.type_column
 
     def _unique_columns(self) -> Iterator[_Column]:
-        """Yield the readable columns whose values no two resources share."""
+        """Yield the columns whose values no two resources share, except those clients never read back."""
         for column in self._columns.values():
-            if column.readable and column.binding.get_annotation(Uniqueness) in (
+            if not column.concealed and column.binding.get_annotation(Uniqueness) in (
                 Uniqueness.server,
                 Uniqueness.global_,
             ):
@@ -860,6 +854,7 @@ class ResourceMapping:
             collection.target = target
             collection.columns = {}
             head = collection.binding.urn
+            concealed = _conceals(collection.binding)
             for binding, column in (
                 (self._resolve(f"{head}.value"), target._id),
                 (
@@ -873,9 +868,9 @@ class ResourceMapping:
                     binding,
                     column.expression,
                     column.key,
-                    column.readable,
                     False,
                     column.textual,
+                    concealed=concealed or _conceals(binding),
                 )
 
     def _target(
@@ -902,7 +897,7 @@ class ResourceMapping:
             if binding is None:
                 continue
             ((_, column),) = self._lookup(binding)
-            if column is not None and column.readable:
+            if column is not None and not column.concealed:
                 return column
         return None
 
@@ -993,10 +988,10 @@ class ResourceMapping:
             )
 
         columns = collection.columns.values()
-        if not all(column.readable for column in columns):
+        if any(column.concealed for column in columns):
             raise ValueError(
-                f"Writing {path!r} replaces its entries, "
-                "so they cannot hold write-only values"
+                f"Writing {path!r} replaces its entries, so they cannot hold "
+                "write-only values, nor values clients never read back"
             )
         if len({column.writable for column in columns}) > 1:
             raise ValueError(
@@ -1057,8 +1052,8 @@ class ResourceMapping:
                     type_binding,  # type: ignore[arg-type]
                     literal(link.type),
                     "type",
-                    True,
                     False,
+                    concealed=_conceals(binding) or _conceals(type_binding),  # type: ignore[arg-type]
                 )
             collections.append(collection)
         return collections
@@ -1068,8 +1063,8 @@ class ResourceMapping:
     ) -> _Column:
         """Build the column of an attribute, and decide whether it is written.
 
-        A read-only attribute, or a hybrid property without a setter, is never
-        written.
+        A read-only attribute, a hybrid property without a setter, or a
+        computed column, is never written.
         """
         if binding.sub_field_name is not None and binding.target_is_multivalued:
             raise ValueError(
@@ -1089,33 +1084,37 @@ class ResourceMapping:
             binding.model.get_field_annotation(binding.field_name, Mutability),
             binding.get_annotation(Mutability),
         }
-        if Mutability.read_only in mutabilities or (
-            isinstance(descriptor, hybrid_property) and descriptor.fset is None
+        mapped = inspect(expression.class_).columns.get(key)
+        if (
+            Mutability.read_only in mutabilities
+            or (isinstance(descriptor, hybrid_property) and descriptor.fset is None)
+            or getattr(mapped, "computed", None) is not None
         ):
             writable = False
-        # The models check an immutable value against the stored one, so the
-        # storage reads it, even when clients never do.
-        hidden = Mutability.write_only in mutabilities or (
-            Mutability.immutable not in mutabilities
-            and Returned.never
-            in (
-                binding.model.get_field_annotation(binding.field_name, Returned),
-                binding.get_annotation(Returned),
+        concealed = _conceals(binding)
+        if concealed and not writable:
+            raise ValueError(
+                f"{path!r} would be neither read nor written by clients: check "
+                "its writable flag, the setter of its property, its column, and "
+                "the mutability and the returned of its schema, or leave it out"
             )
+        hashed = isinstance(getattr(expression, "type", None), Hashed)
+        if hashed and not concealed:
+            raise ValueError(
+                f"{path!r} stores a hash, which clients would read: map it to an "
+                "attribute that the schema makes writeOnly or never returns"
+            )
+        immutable = Mutability.immutable in mutabilities and (
+            Mutability.write_only not in mutabilities
         )
-        readable = attribute.readable and not hidden
-        if not readable and not writable:
+        if hashed and immutable:
             raise ValueError(
-                f"{path!r} would be neither read nor written: check its "
-                "readable and writable flags, the setter of its property and "
-                "the mutability of its schema, or leave it out"
+                f"{path!r} is immutable, so a client sending its value again "
+                "must match the stored one, which a hash never does"
             )
-        if readable and isinstance(getattr(expression, "type", None), Hashed):
-            raise ValueError(
-                f"{path!r} stores a hash, which the storage cannot read back: "
-                "map it to a write-only attribute, or with readable=False"
-            )
-        column = _Column(binding, expression, key, readable, writable)
+        column = _Column(
+            binding, expression, key, writable, concealed=concealed, immutable=immutable
+        )
         python_type = _python_type(expression)
         if (
             column.is_string

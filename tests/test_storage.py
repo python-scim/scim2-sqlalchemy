@@ -1,16 +1,23 @@
 import datetime
 import uuid
+from typing import Annotated
 
 import pytest
+from scim2_models import URN
 from scim2_models import EnterpriseUser
+from scim2_models import Extension
 from scim2_models import Group
 from scim2_models import InvalidFilterException
 from scim2_models import InvalidPathException
 from scim2_models import InvalidValueException
+from scim2_models import Manager
+from scim2_models import Mutability
 from scim2_models import MutabilityException
 from scim2_models import NotFoundException
 from scim2_models import PreconditionFailedException
+from scim2_models import Returned
 from scim2_models import SearchRequest
+from scim2_models import Uniqueness
 from scim2_models import UniquenessException
 from scim2_models import User
 from sqlalchemy import create_engine
@@ -23,6 +30,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
 from scim2_sqlalchemy import Attribute
+from scim2_sqlalchemy import Link
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
 from scim2_sqlalchemy import SqlAlchemyStorage
@@ -98,35 +106,22 @@ def test_a_binary_value_is_read_back_as_sent(storage_factory, user_type):
     assert user.model_dump()["x509Certificates"] == [{"value": "TUlJRA=="}]
 
 
-WRITE_ONLY = pytest.mark.parametrize(
-    "password",
-    [Attribute(UserRecord.password, readable=False), UserRecord.password],
-    ids=["readable=False", "writeOnly in the schema"],
-)
-
-
-@WRITE_ONLY
-def test_a_password_is_written_hashed_and_never_read(
-    sync_storage_factory, session, user_type, password
+def test_a_password_is_written_hashed_and_read_back_as_stored(
+    sync_storage_factory, session, user_type
 ):
-    """A write-only attribute is written through its setter, and never comes back."""
-    storage = sync_storage_factory(
-        {"User": users_mapping({"password": password}), "Group": groups_mapping()}
-    )
+    """The storage gives the hash back, which the server never shows to clients."""
+    storage = sync_storage_factory()
     user = storage.create(user_type, UserModel(user_name="bjensen", password="secret"))
 
-    assert user.password is None
+    assert user.password == "hashed:secret"
     assert session.scalar(select(UserRecord.password_hash)) == "hashed:secret"
 
 
-@WRITE_ONLY
-def test_an_update_without_password_keeps_the_password(
-    sync_storage_factory, session, user_type, password
+def test_a_password_given_back_as_read_is_not_hashed_again(
+    sync_storage_factory, session, user_type
 ):
-    """A resource never carries its password back, so its absence changes nothing."""
-    storage = sync_storage_factory(
-        {"User": users_mapping({"password": password}), "Group": groups_mapping()}
-    )
+    """A replacement without password gives back the hash, which stays as it is."""
+    storage = sync_storage_factory()
     user = storage.create(user_type, UserModel(user_name="bjensen", password="secret"))
     user.display_name = "Barbara"
 
@@ -135,24 +130,153 @@ def test_an_update_without_password_keeps_the_password(
     assert session.scalar(select(UserRecord.password_hash)) == "hashed:secret"
 
 
-@WRITE_ONLY
-def test_a_password_is_not_filtered_on(storage_factory, user_type, password):
+def test_a_password_set_to_none_is_cleared(sync_storage_factory, session, user_type):
+    """A PATCH removing the password gives None to the storage."""
+    storage = sync_storage_factory()
+    user = storage.create(user_type, UserModel(user_name="bjensen", password="secret"))
+    user.password = None
+
+    storage.update(user_type, user)
+
+    assert session.scalar(select(UserRecord.password_hash)) is None
+
+
+def test_a_password_is_not_filtered_on(storage, user_type):
     """A write-only attribute cannot be compared."""
-    storage = storage_factory(
-        {"User": users_mapping({"password": password}), "Group": groups_mapping()}
-    )
     with pytest.raises(InvalidFilterException):
         search(storage, user_type, filter='password eq "secret"')
 
 
-def test_a_write_only_attribute_is_not_sorted_on(storage_factory, user_type):
-    """Sorting on a value the storage never returns would disclose its order."""
-    title = Attribute(UserRecord.title, readable=False)
-    storage = storage_factory(
-        {"User": users_mapping({"title": title}), "Group": groups_mapping()}
+SERIAL = "urn:example:params:scim:schemas:extension:serial:2.0:User"
+
+
+class Serial(Extension):
+    __schema__ = URN(SERIAL)
+
+    serial: Annotated[str | None, Mutability.immutable, Returned.never] = None
+    pin: Annotated[str | None, Mutability.write_only] = None
+    code: Annotated[str | None, Returned.never, Uniqueness.server] = None
+    chief: Annotated[Manager | None, Returned.never] = None
+
+
+def serial_storage(storage_factory, column=UserRecord.title):
+    """Return a storage of users with values clients never read back."""
+    mapping = ResourceMapping(
+        User[Serial],
+        UserRecord,
+        {
+            "id": UserRecord.id,
+            "userName": UserRecord.user_name,
+            f"{SERIAL}:serial": column,
+            f"{SERIAL}:pin": UserRecord.pin_hash,
+            f"{SERIAL}:code": UserRecord.nick_name,
+            f"{SERIAL}:chief": Link(UserRecord.manager, "User"),
+            "meta.created": UserRecord.created,
+            "meta.lastModified": UserRecord.last_modified,
+        },
+        version=UserRecord.version,
     )
-    with pytest.raises(InvalidPathException):
-        search(storage, user_type, sort_by="title")
+    return storage_factory({"User": mapping, "Group": groups_mapping()})
+
+
+def serial_user(user_name, **values):
+    user = User[Serial](user_name=user_name)
+    user[Serial] = Serial(**values)
+    return user
+
+
+@pytest.mark.parametrize(
+    "column",
+    [UserRecord.title, UserRecord.profile_url],
+    ids=["nullable", "not nullable"],
+)
+def test_a_replacement_keeps_a_value_clients_never_read(
+    storage_factory, user_type, column
+):
+    """A client cannot send back the serial, so the server gives the stored one back."""
+    storage = serial_storage(storage_factory, column)
+    created = storage.create(user_type, serial_user("bjensen", serial="A1"))
+    replacement = User[Serial](id=created.id, user_name="bj")
+    replacement.replace(created)
+
+    replaced = storage.update(user_type, replacement)
+
+    assert replaced[Serial].serial == "A1"
+
+
+def test_a_value_clients_never_read_can_be_cleared(storage_factory, user_type):
+    """A PATCH removing the serial clears it."""
+    storage = serial_storage(storage_factory)
+    created = storage.create(user_type, serial_user("bjensen", serial="A1"))
+    created[Serial].serial = None
+
+    assert storage.update(user_type, created)[Serial] is None
+
+
+def test_a_value_clients_never_read_whose_column_needs_one_cannot_be_cleared(
+    storage_factory, user_type
+):
+    """Clearing the serial would leave a NULL in a NOT NULL column, so it raises a 400."""
+    storage = serial_storage(storage_factory, UserRecord.profile_url)
+    created = storage.create(user_type, serial_user("bjensen", serial="A1"))
+    created[Serial].serial = None
+
+    with pytest.raises(MutabilityException):
+        storage.update(user_type, created)
+
+
+def test_a_hash_given_back_as_read_is_not_hashed_again(
+    storage_factory, session, user_type
+):
+    """The pin comes back as its hash, which a replacement gives back unchanged."""
+    storage = serial_storage(storage_factory)
+    created = storage.create(user_type, serial_user("bjensen", pin="1234"))
+    assert created[Serial].pin == "hashed:1234"
+
+    storage.update(user_type, created)
+    assert storage.get(user_type, created.id)[Serial].pin == "hashed:1234"
+
+    created[Serial].pin = "5678"
+    assert storage.update(user_type, created)[Serial].pin == "hashed:5678"
+
+
+def test_a_value_clients_never_read_is_not_filtered_on(storage_factory, user_type):
+    """Filtering would let a client guess the serial one character at a time."""
+    storage = serial_storage(storage_factory)
+
+    with pytest.raises(InvalidFilterException):
+        search(storage, user_type, filter=f'{SERIAL}:serial sw "A"')
+
+
+def test_a_link_clients_never_read_is_not_filtered_on(storage_factory, user_type):
+    """Filtering would tell which user is the chief of another."""
+    storage = serial_storage(storage_factory)
+
+    with pytest.raises(InvalidFilterException):
+        search(storage, user_type, filter=f'{SERIAL}:chief.value eq "1"')
+
+
+def test_a_link_clients_never_read_is_kept_and_cleared(storage_factory, user_type):
+    """The storage reads the chief back, and a PATCH removing it gives None."""
+    storage = serial_storage(storage_factory)
+    chief = storage.create(user_type, serial_user("chief"))
+    created = storage.create(
+        user_type, serial_user("bjensen", chief=Manager(value=chief.id))
+    )
+    assert created[Serial].chief.value == chief.id
+
+    created[Serial].chief = None
+    assert storage.update(user_type, created)[Serial] is None
+
+
+def test_a_unique_value_clients_never_read_is_not_checked(storage_factory, user_type):
+    """A 409 would tell another user holds the same code."""
+    storage = serial_storage(storage_factory)
+    storage.create(user_type, serial_user("bjensen", code="X"))
+
+    other = storage.create(user_type, serial_user("jsmith", code="X"))
+
+    assert other[Serial].code == "X"
 
 
 def test_a_missing_value_keeps_the_default_of_the_column(storage, user_type):

@@ -25,7 +25,7 @@ from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeDecorator
 
-from scim2_sqlalchemy import Attribute
+from scim2_sqlalchemy import Hashed
 from scim2_sqlalchemy import Link
 from scim2_sqlalchemy import Many
 from scim2_sqlalchemy import ResourceMapping
@@ -96,6 +96,7 @@ class UserRecord(Base):
     family_name: Mapped[str | None]
     status: Mapped[str | None]
     password_hash: Mapped[str | None]
+    pin_hash: Mapped[str | None] = mapped_column(Hashed("hashed:{}".format))
     employee_number: Mapped[str | None]
     badge_number: Mapped[int | None]
     profile_url: Mapped[str] = mapped_column(default="https://example.org/profile")
@@ -244,7 +245,7 @@ def users_mapping(changes=None):
         "name.givenName": UserRecord.given_name,
         "name.familyName": UserRecord.family_name,
         "active": UserRecord.active,
-        "password": Attribute(UserRecord.password, readable=False),
+        "password": UserRecord.password,
         "emails": Many(
             UserRecord.emails,
             {

@@ -159,7 +159,7 @@ def test_a_group_holds_users_and_groups(storage, user_type, group_type):
 def test_the_password_is_stored_hashed(
     sync_storage_factory, session, generated, user_type
 ):
-    """The column holds what the hash function returns, and the user never shows it."""
+    """The column holds what the hash function returns, which the storage gives back as is."""
     storage = sync_storage_factory(mappings=generated)
     user = storage.create(
         user_type, User[EnterpriseUser](user_name="alice", password="secret")
@@ -167,7 +167,10 @@ def test_the_password_is_stored_hashed(
     record = generated["User"].record
 
     assert session.scalar(select(record.password)) == "hashed:secret"
-    assert user.password is None
+    assert user.password == "hashed:secret"
+
+    storage.update(user_type, user)
+    assert session.scalar(select(record.password)) == "hashed:secret"
 
 
 def test_two_users_can_manage_each_other(storage, user_type):
@@ -356,7 +359,7 @@ def test_an_attribute_without_a_column_takes_no_column_type(urn):
         )
 
 
-def test_a_readable_attribute_cannot_be_hashed():
+def test_an_attribute_clients_read_cannot_be_hashed():
     """The storage would return the hash of the user name instead of the user name."""
     user_name = "urn:ietf:params:scim:schemas:core:2.0:User:userName"
 
@@ -479,7 +482,7 @@ def test_attributes_the_storage_cannot_hold_are_left_out():
     assert isinstance(metadata.tables["projects_tags"].c.value.type, String)
     assert "projects_codes" not in metadata.tables
     assert "projects_tokens" not in metadata.tables
-    assert "projects_serials" in metadata.tables
+    assert "projects_serials" not in metadata.tables
     assert "projects_keys" not in metadata.tables
     assert "projects_archives" not in metadata.tables
 

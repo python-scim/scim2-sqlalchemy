@@ -235,7 +235,7 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
     ) -> list[tuple[_Collection | None, _Column]]:
         """Return the collections holding an attribute with its column in each, refusing an attribute that one of them does not let filters read."""
         pairs = self._lookup(binding)
-        if any(column is None or not column.readable for _, column in pairs):
+        if any(column is None or column.concealed for _, column in pairs):
             raise _unmapped(binding)
         return pairs  # type: ignore[return-value]
 
@@ -296,7 +296,7 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
         in_collection = pairs[0][0] is not None
         if in_collection and binding.sub_field_name is None and pairs[0][1] is None:
             return or_(*(collection.exists() for collection, _ in pairs))  # type: ignore[union-attr]
-        if all(column is not None and column.readable for _, column in pairs):
+        if all(column is not None and not column.concealed for _, column in pairs):
             return or_(
                 *(
                     self._in_collection(collection, _present(column))  # type: ignore[arg-type]
@@ -305,7 +305,9 @@ class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
             )
 
         sub_columns = [
-            column for column in self.mapping._sub_columns(binding) if column.readable
+            column
+            for column in self.mapping._sub_columns(binding)
+            if not column.concealed
         ]
         if in_collection or not sub_columns:
             raise _unmapped(binding)
@@ -430,7 +432,7 @@ def _sort_key(
     collection, column = mapping._lookup(binding)[0]
     if (
         column is None
-        or not column.readable
+        or column.concealed
         or (collection is not None and not collection.owned)
     ):
         raise InvalidPathException(

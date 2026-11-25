@@ -65,8 +65,8 @@ application checks a password against the stored hash with the same hash functio
 of the algorithm belongs to the application.
 
 A write-only multi-valued attribute, or a write-only sub-attribute of a multi-valued attribute,
-gets no column, and ``store`` is not asked about it. Writing the resource replaces the entries,
-and a request never carries these values back, so they would be lost.
+gets no column, and ``store`` is not asked about it. Writing the resource creates the entries
+again, so they cannot hold values that clients never read back.
 
 A server loading its schemas at run time does not know their URNs in advance. It can decide on
 the annotations of the attribute instead, here to hash every write-only string:
@@ -83,8 +83,8 @@ the annotations of the attribute instead, here to hash every write-only string:
 A column type can also convert the values both ways, such as a
 :class:`~sqlalchemy.types.TypeDecorator` encrypting them. Filters then compare the converted
 values: ``eq`` works when the conversion always gives the same result, but ``sw``, ``co`` and the
-sorts do not. A column type converting the values one way only, as a hash does, suits a
-write-only attribute only, since the storage would return the converted values.
+sorts do not. A column type converting the values one way only, as a hash does, only suits an
+attribute that clients never read, since the storage returns the converted values.
 
 Create the tables
 -----------------

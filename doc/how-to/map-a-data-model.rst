@@ -154,16 +154,19 @@ outside the enumeration with a 400 error.
 Map a write-only or a read-only attribute
 -----------------------------------------
 
-Wrap a column or a property in an :class:`~scim2_sqlalchemy.Attribute` to limit what the
-storage does with it:
+Wrap a column or a property in an :class:`~scim2_sqlalchemy.Attribute` with ``writable=False``
+to make its attribute read-only, even when the column or the property can be written. A property
+without setter, or a :class:`~sqlalchemy.schema.Computed` column, is read-only without it.
 
-- with ``readable=False``, the attribute is write-only: the storage never returns it, nor
-  filters or sorts on it. An attribute that the schema makes ``writeOnly``, such as
-  ``password``, or never returns, is write-only too, even without ``readable=False``.
-- with ``writable=False``, the attribute is read-only, even when its column or its property
-  can be written.
+An attribute that the schema makes ``writeOnly``, such as ``password``, or never returns, holds a
+value that clients never read back. The storage still reads it, in the form its column holds,
+such as a hash, and the server never shows it to clients. A PUT without the value gives the
+stored one back to the storage, which keeps it as it is: a value equal to the stored one is not
+written again. A PATCH that removes the value, or a PUT that sets it to ``null``, clears it. The
+storage neither filters nor sorts on such a value, and does not check that it is unique: give its
+column a unique constraint instead.
 
-The intranet hashes the password in the setter of a property:
+The intranet hashes the password in the setter of a property, whose getter returns the hash:
 
 .. literalinclude:: ../_examples/intranet/models.py
    :language: python
@@ -172,8 +175,7 @@ The intranet hashes the password in the setter of a property:
    :dedent: 4
    :prepend: @hybrid_property
 
-The schema makes ``password`` write-only, so the mapping needs no
-:class:`~scim2_sqlalchemy.Attribute`:
+The schema makes ``password`` write-only, so the mapping is plain:
 
 .. code-block:: python
 
@@ -181,16 +183,17 @@ The schema makes ``password`` write-only, so the mapping needs no
 
 A column of type :class:`~scim2_sqlalchemy.Hashed` hashes the values the same way, without a
 property: ``mapped_column(Hashed(hash_password))``. The mapping refuses it for an attribute that
-is not write-only.
+clients read, since they would read the hash. It also refuses it for an ``immutable`` attribute:
+a client sending the value again would get a 400 error, since the value never matches its hash.
 
-A write-only attribute keeps its stored value when a request does not carry it, since a
-resource never carries it back. A PATCH that removes it, or a PUT that sets it to ``null``,
-keeps it too: the server never reads the value, so it finds nothing to remove. The storage does
-not check that a write-only value is unique, since it never reads the stored values: give its
-column a unique constraint instead.
+When a setter turns ``None`` into a value, such as a hash that matches no password, the getter
+should give ``None`` back for this value. Otherwise, a removed password still reads as a value.
 
-The mapping refuses an attribute that would be neither read nor written, such as a write-only
-attribute on a property without setter.
+A write-only sub-attribute of an ``immutable`` attribute can change, as the schema makes it
+write-only.
+
+The mapping refuses an attribute that clients could neither read nor write, such as a
+write-only attribute on a property without setter, or on a computed column.
 
 Map a list of values
 --------------------
@@ -244,11 +247,11 @@ The relationship needs the same cascade as for a list of values, and its ``order
 order of the entries. A sort on the attribute uses the entry marked ``primary``, or else the
 first entry.
 
-Writing the resource replaces its entries, so a value the request does not carry would be lost.
-A client never sends back a write-only value, so the mapping refuses a write-only sub-attribute.
-A PATCH ``add`` would otherwise replace the entries the client never read. The mapping also
-refuses a read-only sub-attribute next to written ones: the sub-attributes are all written or
-all read-only.
+Writing the resource creates its entries again, so the mapping refuses a sub-attribute that
+clients never read back, such as a write-only one. Its value comes back in the form its column
+holds, such as a hash, and would be written again in a new entry. The mapping also refuses a
+read-only sub-attribute next to written ones: the sub-attributes are all written or all
+read-only.
 
 Link to other resources
 -----------------------

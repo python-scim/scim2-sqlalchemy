@@ -1,5 +1,6 @@
 import datetime
 import uuid
+from typing import Annotated
 
 import pytest
 from scim2_models import URN
@@ -255,10 +256,30 @@ def test_a_missing_value_is_left_out(factory, database_url, user_type):
     assert factory().get(user_type, user_id)[Tagged].tags == ["red"]
 
 
+SECRET = "urn:example:params:scim:schemas:extension:secret:2.0:User"
+
+
+class Secret(Extension):
+    __schema__ = URN(SECRET)
+
+    tags: Annotated[list[str] | None, Mutability.write_only] = None
+
+
 def test_write_only_values_are_refused():
-    """A PATCH adding a tag would replace the tags a client never reads back."""
+    """Writing the tags creates their records again, so a value read back in another form would be written as is."""
     with pytest.raises(ValueError, match="cannot hold write-only values"):
-        tagged_mapping(tags=Attribute(Tag.value, readable=False))
+        ResourceMapping(
+            User[Secret],
+            TaggedUser,
+            {
+                "id": TaggedUser.id,
+                "userName": TaggedUser.user_name,
+                f"{SECRET}:tags": Many(TaggedUser.tags, Tag.value),
+                "meta.created": TaggedUser.created,
+                "meta.lastModified": TaggedUser.last_modified,
+            },
+            version=TaggedUser.version,
+        )
 
 
 @pytest.mark.parametrize(

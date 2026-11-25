@@ -110,13 +110,10 @@ class _Forward:
 
 
 def _hidden(attribute: Any) -> bool:
-    """Tell whether clients never read an attribute back: the storage cannot read it either."""
+    """Tell whether clients never read an attribute back."""
     return bool(
         attribute.mutability == Mutability.write_only
-        or (
-            attribute.mutability != Mutability.immutable
-            and attribute.returned == Returned.never
-        )
+        or attribute.returned == Returned.never
     )
 
 

@@ -44,9 +44,9 @@ def _as_stored(value: Any) -> Any:
 
 
 def _read(column: _Column, record: Any) -> Any:
-    """Return the SCIM value of a column of a record, or None if the column is not read."""
+    """Return the SCIM value of a column of a record."""
     value = getattr(record, column.key)
-    if value is None or not column.readable:
+    if value is None:
         return None
     if isinstance(value, Enum) and column.enumeration is not None:
         return column.stored_string(column.enumeration, value)
@@ -154,19 +154,22 @@ def _from_scim(
 ) -> None:
     """Write a resource into a record.
 
-    Read-only attributes are left as they are, and so is a write-only attribute
-    the resource has no value for, since a resource never carries it back.
-    When creating the record, a missing value is not written, so that the
-    column keeps its default. links holds the records each Link of the
-    resource links to.
+    Read-only attributes are left as they are. A value equal to the stored one
+    is not written again, so that a hash given back as it was read is not
+    hashed again. When creating the record, a missing value is not written, so
+    that the column keeps its default. links holds the records each Link of
+    the resource links to.
     """
     for column in mapping._columns.values():
         if not column.writable:
             continue
         value = Path(column.binding.urn).get(resource, strict=False)
-        if value is None and (creating or not column.readable):
+        if value is None and creating:
             continue
-        setattr(record, column.key, None if value is None else _as_stored(value))
+        stored = None if value is None else _as_stored(value)
+        if not creating and stored == getattr(record, column.key):
+            continue
+        setattr(record, column.key, stored)
 
     for collection in mapping._all_collections():
         if not collection.writable:
