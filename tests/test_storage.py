@@ -4,6 +4,7 @@ from typing import Annotated
 
 import pytest
 from scim2_models import URN
+from scim2_models import ConflictException
 from scim2_models import EnterpriseUser
 from scim2_models import Extension
 from scim2_models import Group
@@ -854,6 +855,37 @@ def test_a_unique_value_taken_raises_a_409_whatever_the_driver(error):
         _translate(IntegrityError("INSERT", {}, error))
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        DriverError("foreign key violation", sqlstate="23503"),
+        DriverError("foreign key violation", pgcode="23503"),
+        DriverError(
+            "FOREIGN KEY failed", sqlite_errorname="SQLITE_CONSTRAINT_FOREIGNKEY"
+        ),
+        DriverError(1451, "Cannot delete a parent row", sqlstate="23000"),
+        DriverError("Cannot add a child row", errno=1452, sqlstate="23000"),
+        DriverError(1217, "Cannot delete a parent row", sqlstate="23000"),
+        DriverError("Cannot add a child row", errno=1216, sqlstate="23000"),
+    ],
+    ids=[
+        "psycopg",
+        "psycopg2",
+        "sqlite3",
+        "PyMySQL",
+        "MariaDB Connector",
+        "PyMySQL without details",
+        "MariaDB Connector without details",
+    ],
+)
+def test_a_broken_foreign_key_raises_a_409_whatever_the_driver(error):
+    """Each driver tells a broken foreign key its own way, and none of them is a uniqueness error."""
+    with pytest.raises(ConflictException) as raised:
+        _translate(IntegrityError("DELETE", {}, error))
+
+    assert not isinstance(raised.value, UniquenessException)
+
+
 def test_an_error_without_a_code_goes_through():
     """An error the storage cannot tell apart is left to the application."""
     _translate(IntegrityError("INSERT", {}, DriverError()))
@@ -873,8 +905,10 @@ def test_a_savepoint_gone_on_its_own_goes_through():
     _translate(OperationalError("ROLLBACK", {}, DriverError(1305, "SAVEPOINT")))
 
 
-def test_a_deletion_the_database_refuses_raises(storage_factory, session, user_type):
-    """A record outside SCIM can keep a resource from being deleted."""
+def test_a_deletion_the_database_refuses_raises_a_409(
+    storage_factory, session, user_type
+):
+    """A record outside SCIM still referring to a resource keeps it from being deleted."""
     now = datetime.datetime.now(datetime.UTC)
     user_id = uuid.uuid4()
     session.add(
@@ -884,8 +918,10 @@ def test_a_deletion_the_database_refuses_raises(storage_factory, session, user_t
     session.add(BadgeRecord(user_id=user_id))
     session.commit()
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ConflictException):
         storage_factory().delete(user_type, str(user_id))
+
+    assert storage_factory().get(user_type, str(user_id)).user_name == "bjensen"
 
 
 @pytest.mark.parametrize(

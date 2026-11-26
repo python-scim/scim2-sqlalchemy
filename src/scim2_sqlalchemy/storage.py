@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from typing import Any
 
+from scim2_models import ConflictException
 from scim2_models import InvalidValueException
 from scim2_models import NotFoundException
 from scim2_models import Path
@@ -126,6 +127,17 @@ _UNIQUE_VIOLATIONS = {
 """The codes of a unique value already taken: the SQLSTATE of PostgreSQL, the
 name of the SQLite error, and the number of the MariaDB error."""
 
+_FOREIGN_KEY_VIOLATIONS = {
+    "23503",
+    "SQLITE_CONSTRAINT_FOREIGNKEY",
+    1216,
+    1217,
+    1451,
+    1452,
+}
+"""The codes of a foreign key the change breaks, such as a record still
+referring to a deleted one, as _UNIQUE_VIOLATIONS gives them."""
+
 _CHANGED_MEANWHILE = 1020
 """The number of the MariaDB error on a record another transaction changed since it was read."""
 
@@ -153,7 +165,7 @@ def _error_code(error: BaseException | None) -> Any:
 
 
 def _translate(exception: DBAPIError) -> None:
-    """Raise the SCIM error of a database error: 409 for a unique value taken, 412 for a record changed meanwhile.
+    """Raise the SCIM error of a database error: 409 for a unique value taken or a foreign key broken, 412 for a record changed meanwhile.
 
     MariaDB rolls back the whole transaction on a record changed meanwhile.
     Rolling back to the savepoint then fails, and its error holds the first
@@ -164,6 +176,10 @@ def _translate(exception: DBAPIError) -> None:
         code = _error_code(exception.__context__.orig)
     if code in _UNIQUE_VIOLATIONS:
         raise UniquenessException from exception
+    if code in _FOREIGN_KEY_VIOLATIONS:
+        raise ConflictException(
+            detail="Another record refers to this resource, or it refers to a missing one"
+        ) from exception
     if code == _CHANGED_MEANWHILE:
         raise PreconditionFailedException from exception
 
@@ -635,7 +651,9 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         A version changed in the meantime by another transaction raises a 412.
         A unique value taken in the meantime raises a 409, as does a value
         the unique constraint of the database refuses, such as a value that
-        differs only by its accents under a collation ignoring them.
+        differs only by its accents under a collation ignoring them. A
+        foreign key the change breaks raises a 409 too, such as a record
+        outside SCIM still referring to a deleted resource.
         """
         session = self.session()
         try:

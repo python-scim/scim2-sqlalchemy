@@ -51,6 +51,8 @@ Fixed
   unique, so a 409 does not disclose it: a unique constraint of the database does.
 - An attribute on a :class:`~sqlalchemy.schema.Computed` column is read-only, and published
   ``readOnly``.
+- A change that a foreign key of the database refuses gets a 409, rather than a 500 error. For
+  example, a record outside SCIM can still refer to the resource being deleted.
 
 [0.2.0] - 2026-11-24
 --------------------
