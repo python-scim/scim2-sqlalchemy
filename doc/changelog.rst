@@ -1,6 +1,30 @@
 Changelog
 =========
 
+[Unreleased]
+------------
+
+Added
+^^^^^
+- The storage checks the unique sub-attributes, such as ``emails.value``. It checks each value
+  of a multi-valued attribute on its own.
+
+Changed
+^^^^^^^
+- scim2-server 0.10.0 or later is required.
+- A mapping refuses a unique attribute that clients never read back, with a
+  :class:`ValueError`: a 409 would tell that another resource holds the value. So does
+  :func:`~scim2_sqlalchemy.generate_mappings`.
+- An update keeps a unique value that differs from the stored one only by its case, when the
+  attribute is not ``caseExact``, even if another resource holds it.
+
+Fixed
+^^^^^
+- Per :rfc:`7643` erratum 8279, a unique value clashes with the resources of every resource type
+  whose schema holds the attribute.
+- A unique index that an application adds to the table of a :class:`~scim2_sqlalchemy.Many`
+  accepts a resource keeping its value.
+
 [0.4.0] - 2026-11-27
 --------------------
 

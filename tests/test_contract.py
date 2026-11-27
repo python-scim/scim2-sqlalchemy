@@ -2,19 +2,24 @@ import pytest
 from scim2_server.testing import AsyncScimStorageContract
 from scim2_server.testing import ScimStorageContract
 
+from .mailboxes import MAILBOX_MAPPINGS
 from .plain import PLAIN_MAPPINGS
 
 
 class TestSqlAlchemyStorage(ScimStorageContract):
+    stores_mailboxes = True
+
     @pytest.fixture
     def storage(self, sync_storage_factory):
-        return sync_storage_factory()
+        return sync_storage_factory(MAILBOX_MAPPINGS)
 
 
 class TestAsyncSqlAlchemyStorage(AsyncScimStorageContract):
+    stores_mailboxes = True
+
     @pytest.fixture
     def storage(self, async_storage_factory):
-        return async_storage_factory()
+        return async_storage_factory(MAILBOX_MAPPINGS)
 
 
 def one_work_email(user):

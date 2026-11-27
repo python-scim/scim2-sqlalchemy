@@ -201,16 +201,33 @@ Unique values are checked twice
 Before a write, the storage searches for another record holding a unique value of the resource,
 such as its ``userName``, and answers 409 when it finds one. The search follows the case rules of
 the attribute, so ``BJensen`` clashes with ``bjensen``, which a plain unique constraint does not
-catch. A unique constraint of the database remains the guard against two concurrent writes. When
-a flush fails on a unique constraint, the storage answers 409. This also holds when the constraint
-is stricter than the search: under a collation that ignores the accents, as the default ones of
+catch.
+
+A unique value can be below an attribute, such as ``emails.value``. Each value of a multi-valued
+attribute counts on its own, wherever the mapping stores it: in a column, in an
+:class:`~scim2_sqlalchemy.Entry`, in the entries of a :class:`~scim2_sqlalchemy.Many`, or as the
+target of a :class:`~scim2_sqlalchemy.Link`. A resource may hold the same value twice. Per
+:rfc:`7643` erratum 8279, the search covers every resource type whose schema holds the attribute.
+The schema cannot make unique a value that clients never read back: the mapping refuses it, as a
+409 would tell that another resource holds the value.
+
+A unique constraint of the database remains the guard against two concurrent writes. When a flush
+fails on a unique constraint, the storage answers 409. This also holds when the constraint is
+stricter than the search: under a collation that ignores the accents, as the default ones of
 MariaDB do, ``José`` clashes with ``Jose``. A flush that fails on a foreign key also gets a 409,
 such as deleting a resource that a record outside SCIM still refers to. Any other
 :exc:`~sqlalchemy.exc.IntegrityError` goes through unchanged.
 
+:func:`~scim2_sqlalchemy.generate_mappings` puts a unique constraint on the unique columns of the
+records only. Two concurrent writes can then take the same value of an entry. An application can
+add a unique index to the table of the entries. The storage deletes the old entries before it
+inserts the new ones, so the index accepts a resource that keeps its value. The index also refuses
+a value repeated in one resource, which SCIM allows.
+
 An update only checks the unique values it changes. Another application may have stored values
 that clash under the case rules of SCIM, such as ``alice`` and ``Alice``. Each resource then
-remains writable while it keeps its value.
+remains writable while it keeps its value. Writing ``ALICE`` keeps the value too, as
+``userName`` is not ``caseExact``.
 
 The application owns the transaction
 ------------------------------------

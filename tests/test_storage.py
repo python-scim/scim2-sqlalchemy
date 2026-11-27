@@ -18,7 +18,6 @@ from scim2_models import NotFoundException
 from scim2_models import PreconditionFailedException
 from scim2_models import Returned
 from scim2_models import SearchRequest
-from scim2_models import Uniqueness
 from scim2_models import UniquenessException
 from scim2_models import User
 from sqlalchemy import create_engine
@@ -156,7 +155,6 @@ class Serial(Extension):
 
     serial: Annotated[str | None, Mutability.immutable, Returned.never] = None
     pin: Annotated[str | None, Mutability.write_only] = None
-    code: Annotated[str | None, Returned.never, Uniqueness.server] = None
     chief: Annotated[Manager | None, Returned.never] = None
 
 
@@ -170,7 +168,6 @@ def serial_storage(storage_factory, column=UserRecord.title):
             "userName": UserRecord.user_name,
             f"{SERIAL}:serial": column,
             f"{SERIAL}:pin": UserRecord.pin_hash,
-            f"{SERIAL}:code": UserRecord.nick_name,
             f"{SERIAL}:chief": Link(UserRecord.manager, "User"),
             "meta.created": UserRecord.created,
             "meta.lastModified": UserRecord.last_modified,
@@ -268,16 +265,6 @@ def test_a_link_clients_never_read_is_kept_and_cleared(storage_factory, user_typ
 
     created[Serial].chief = None
     assert storage.update(user_type, created)[Serial] is None
-
-
-def test_a_unique_value_clients_never_read_is_not_checked(storage_factory, user_type):
-    """A 409 would tell another user holds the same code."""
-    storage = serial_storage(storage_factory)
-    storage.create(user_type, serial_user("bjensen", code="X"))
-
-    other = storage.create(user_type, serial_user("jsmith", code="X"))
-
-    assert other[Serial].code == "X"
 
 
 def test_a_missing_value_keeps_the_default_of_the_column(storage, user_type):
@@ -760,7 +747,7 @@ def test_a_string_is_stored_in_an_integer_column_through_a_property(
 class TakenMeanwhile:
     """Skip the uniqueness check, as when another transaction takes the value right after it."""
 
-    def _unique_statements(self, mapping, resource, comparator, stored):
+    def _unique_statements(self, resource, comparator, stored, record):
         return iter(())
 
 
@@ -960,11 +947,14 @@ def test_a_uuid_identifier_matches_its_own_text(storage, user_type, scim_filter,
 def test_an_unchanged_unique_value_is_not_checked_again(
     sync_storage_factory, session, user_type, database_url
 ):
-    """Another application stored alice and Alice: Alice remains writable while she keeps her name."""
+    """Another application stored alice and Alice: Alice remains writable while she keeps her name.
+
+    userName is not caseExact, so ALICE is the name she holds, and not a new one.
+    """
     if database_url.startswith("mariadb"):
         pytest.skip("The default collation of MariaDB cannot hold alice and Alice")
     now = datetime.datetime.now(datetime.UTC)
-    for user_name in ("alice", "Alice"):
+    for user_name in ("alice", "Alice", "bob"):
         session.add(UserRecord(user_name=user_name, created=now, last_modified=now))
     session.flush()
     storage = sync_storage_factory()
@@ -974,6 +964,8 @@ def test_an_unchanged_unique_value_is_not_checked_again(
 
     assert storage.update(user_type, alice).display_name == "Alice"
     alice.user_name = "ALICE"
+    assert storage.update(user_type, alice).user_name == "ALICE"
+    alice.user_name = "Bob"
     with pytest.raises(UniquenessException):
         storage.update(user_type, alice)
 

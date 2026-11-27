@@ -14,6 +14,7 @@ from scim2_models import Resource
 from scim2_models import ResourceType
 from scim2_models import Returned
 from scim2_models import ScimProvider
+from scim2_models import Uniqueness
 from scim2_models import User
 from scim2_server.applications.wsgi import WSGIApplication
 from scim2_server.utils import load_default_provider
@@ -597,3 +598,17 @@ def test_an_inverse_reads_the_links_of_another_attribute(
     )
     projects = storage.get(user_type, alice.id)[Staffing].projects
     assert [p.value for p in projects] == [project.id]
+
+
+class Vault(Resource):
+    """A resource type whose code is unique and never returned."""
+
+    __schema__ = URN("urn:example:params:scim:schemas:core:2.0:Vault")
+
+    code: Annotated[str | None, Returned.never, Uniqueness.server] = None
+
+
+def test_a_unique_value_hidden_from_clients_is_refused():
+    """A 409 on the code would tell that another vault holds it."""
+    with pytest.raises(ValueError, match="hidden from clients"):
+        generate_mappings(ScimProvider(models=[Vault]), MetaData())

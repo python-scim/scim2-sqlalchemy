@@ -164,8 +164,8 @@ value that clients never read back. The storage still reads it, in the form its 
 such as a hash, and the server never shows it to clients. A PUT without the value gives the
 stored one back to the storage, which keeps it as it is: a value equal to the stored one is not
 written again. A PATCH that removes the value, or a PUT that sets it to ``null``, clears it. The
-storage neither filters nor sorts on such a value, and does not check that it is unique: give its
-column a unique constraint instead.
+storage neither filters nor sorts on such a value. The schema cannot make it unique: the mapping
+refuses it, as a 409 would tell that another resource holds the value.
 
 The intranet hashes the password in the setter of a property, whose getter returns the hash:
 

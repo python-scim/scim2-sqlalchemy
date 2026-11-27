@@ -19,6 +19,7 @@ from sqlalchemy.pool import NullPool
 from scim2_sqlalchemy import AsyncSqlAlchemyStorage
 from scim2_sqlalchemy import SqlAlchemyStorage
 
+from .mailboxes import MAILBOX_MAPPINGS  # noqa: F401  The tables of the mailboxes are created with the others.
 from .models import GROUPS
 from .models import MAPPINGS
 from .models import USERS
