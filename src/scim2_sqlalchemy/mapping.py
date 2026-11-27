@@ -1,25 +1,23 @@
+import base64
+import datetime
 import warnings
 from collections.abc import Callable
 from collections.abc import Iterable
-from collections.abc import Iterator
 from collections.abc import Mapping
 from dataclasses import dataclass
-from dataclasses import field
 from enum import Enum
-from inspect import isclass
 from typing import Any
 
-from pydantic import BaseModel
-from scim2_models import Attribute as SchemaAttribute
 from scim2_models import AttributeBinding
 from scim2_models import Mutability
-from scim2_models import Path
-from scim2_models import Required
 from scim2_models import Resource
-from scim2_models import ResponseParameters
-from scim2_models import Returned
 from scim2_models import Schema
-from scim2_models import Uniqueness
+from scim2_server import mapping as core
+from scim2_server.mapping import MappingProblem
+from scim2_server.mapping.declaration import key
+from scim2_server.mapping.declaration import mutabilities
+from scim2_server.mapping.declaration import never_returned
+from scim2_server.mapping.mapping import Problems
 from sqlalchemy import Column
 from sqlalchemy import ColumnElement
 from sqlalchemy import Dialect
@@ -29,7 +27,6 @@ from sqlalchemy import Uuid
 from sqlalchemy import cast
 from sqlalchemy import func
 from sqlalchemy import inspect
-from sqlalchemy import literal
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -59,23 +56,6 @@ _INTEGERS = range(-(2**63), 2**63)
 
 _UUID_GROUPS = ((1, 8), (9, 4), (13, 4), (17, 4), (21, 12))
 """The start and the length of each group of digits of a UUID, without its hyphens."""
-
-
-class _Storage(Enum):
-    """How a mapping stores an attribute.
-
-    A derived attribute is read from another resource, such as the display of
-    a member, so writing it changes nothing. A ref is the $ref of a link,
-    built from its value: clients may send it, and writing it changes nothing
-    either. A link type is the type a Link gives its entries: clients may send
-    it, and the storage checks it against the linked resource.
-    """
-
-    written = "written"
-    read_only = "read only"
-    derived = "derived"
-    ref = "ref"
-    link_type = "link type"
 
 
 class _UuidText(FunctionElement[str]):
@@ -132,18 +112,6 @@ def _needs_value(column: Column[Any]) -> bool:
     )
 
 
-def _conceals(binding: AttributeBinding) -> bool:
-    """Whether clients never read an attribute back: its schema, or the one of the attribute holding it, makes it writeOnly or never returns it."""
-    model, field_name = binding.model, binding.field_name
-    return Mutability.write_only in (
-        model.get_field_annotation(field_name, Mutability),
-        binding.get_annotation(Mutability),
-    ) or Returned.never in (
-        model.get_field_annotation(field_name, Returned),
-        binding.get_annotation(Returned),
-    )
-
-
 def _python_type(expression: Any) -> type | None:
     """Return the Python type of the values of an expression, or None if its type tells none.
 
@@ -161,35 +129,49 @@ def _holds_text(expression: Any) -> bool:
     return _python_type(expression) in (str, None)
 
 
-def _key(binding: AttributeBinding) -> tuple[type[BaseModel], str, str | None]:
-    """Return what identifies an attribute, whatever the case or the form of its path."""
-    return (binding.model, binding.field_name, binding.sub_field_name)
+def _as_scim(value: Any) -> Any:
+    """Return a value read from the database in the form SCIM holds it.
 
-
-def _overlap(
-    key: tuple[type[BaseModel], str, str | None],
-    other: tuple[type[BaseModel], str, str | None],
-) -> bool:
-    """Tell whether two attributes are the same, or one holds the other."""
-    return key == other or (key[:2] == other[:2] and None in (key[2], other[2]))
-
-
-class Attribute:
-    """A column holding a SCIM attribute, whose writing can be turned off.
-
-    To store a value in another form, map the attribute to a
-    :class:`~sqlalchemy.ext.hybrid.hybrid_property` that converts it, in Python
-    and in SQL.
-
-    :param expression: The column, or the
-        :class:`~sqlalchemy.ext.hybrid.hybrid_property`, holding the value.
-    :param writable: Whether the storage writes the attribute. When
-        :data:`False`, the attribute is read-only.
+    A date without a time zone is taken as UTC, since SQLite drops the zone.
+    Binary values are encoded in base64, the form the models decode them from.
     """
+    if isinstance(value, datetime.datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=datetime.UTC)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode()
+    return value
 
-    def __init__(self, expression: Any, *, writable: bool = True) -> None:
-        self.expression = expression
-        self.writable = writable
+
+def _as_key(column: "_Column", value: Any) -> Any:
+    """Return an identifier in the type of its column, or None when it cannot have that type."""
+    python_type = _python_type(column.expression)
+    if python_type is None:
+        return value
+    try:
+        key = python_type(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(key, int) and key not in _INTEGERS:
+        return None
+    return key
+
+
+def _writes(descriptor: Any, mapped: Any) -> bool:
+    """Tell whether the storage can write a value: a hybrid property needs a setter, and a computed column is never written."""
+    if isinstance(descriptor, hybrid_property) and descriptor.fset is None:
+        return False
+    return getattr(mapped, "computed", None) is None
+
+
+def _column_name(column: Column[Any]) -> str:
+    """Return the name of a column of a table, as the warnings give it."""
+    return f"{column.table.name}.{column.name}"
+
+
+def _sql_writable(binding: AttributeBinding) -> bool:
+    """Tell whether the schema lets clients write an attribute."""
+    mutability = binding.model.get_field_annotation(binding.field_name, Mutability)
+    return bool(mutability != Mutability.read_only)
 
 
 class Hashed(TypeDecorator[str]):
@@ -226,7 +208,29 @@ class Hashed(TypeDecorator[str]):
         return None if value is None else self.hash_value(value)
 
 
-class Many:
+class Attribute(core.Attribute):
+    """A column holding a SCIM attribute, whose writing can be turned off.
+
+    To store a value in another form, map the attribute to a
+    :class:`~sqlalchemy.ext.hybrid.hybrid_property` that converts it, in Python
+    and in SQL.
+
+    :param expression: The column, or the
+        :class:`~sqlalchemy.ext.hybrid.hybrid_property`, holding the value.
+    :param writable: Whether the storage writes the attribute. When
+        :data:`False`, the attribute is read-only.
+    """
+
+    def __init__(self, expression: Any, *, writable: bool = True) -> None:
+        super().__init__(expression, writable=writable)
+
+    @property
+    def expression(self) -> Any:
+        """The column, or the hybrid property, holding the value."""
+        return self.target
+
+
+class Many(core.Many):
     """The entries of a multi-valued attribute, stored in a child table.
 
     The entries belong to the resource: writing the resource replaces them.
@@ -251,11 +255,35 @@ class Many:
     """
 
     def __init__(self, relationship: Any, attributes: Mapping[str, Any] | Any) -> None:
-        self.relationship = relationship
-        self.attributes = attributes
+        super().__init__(relationship, attributes)
+
+    @property
+    def relationship(self) -> Any:
+        """The relationship from the resource record to the entry records."""
+        return self.relation
 
 
-class Link:
+class Entry(core.Entry):
+    """A multi-valued complex attribute holding one entry at most, stored in columns of the resource record.
+
+    Such as the email address of a user, in its ``email`` column. The
+    resource holds an entry when one of the columns has a value, so the
+    columns accept ``NULL``: a write removing the entry empties them. A write
+    with several entries is refused.
+
+    :param attributes: The columns of the resource record holding the
+        sub-attributes, by sub-attribute name, such as
+        ``{"value": UserRecord.email}``. A value may be an :class:`Attribute`.
+    :param type: The ``type`` sub-attribute of the entry, such as
+        ``"work"``. A client may send it, and a write with another type is
+        refused. Without it, the storage does not store ``type``.
+    :param primary: The ``primary`` sub-attribute of the entry. A client may
+        send any value, as the lone entry is the primary one, and reads this
+        one back. Without it, the storage does not store ``primary``.
+    """
+
+
+class Link(core.Link):
     """A complex attribute linking to other resources.
 
     A multi-valued attribute, such as the ``members`` of a group, maps to a
@@ -291,56 +319,22 @@ class Link:
     def __init__(
         self, relationship: Any, resource_type: str, *, type: str | None = None
     ) -> None:
-        self.relationship = relationship
-        self.resource_type = resource_type
-        self.type = type
+        super().__init__(relationship, resource_type, type=type)
+
+    @property
+    def relationship(self) -> Any:
+        """The relationship from the resource record to the records of the linked resources."""
+        return self.relation
 
 
 @dataclass(eq=False)
-class _Column:
-    """A SCIM attribute stored in a column or a hybrid property.
+class _Column(core.Column):
+    """A SCIM attribute stored in a column or a hybrid property."""
 
-    textual tells whether filters compare the column as text, as they do for
-    an integer identifier. concealed tells whether clients never read the
-    value back, and immutable whether the schema keeps it from changing.
-    """
-
-    binding: AttributeBinding
-    expression: ColumnElement[Any]
-    key: str
-    writable: bool
-    textual: bool = False
-    concealed: bool = False
-    immutable: bool = False
+    expression: ColumnElement[Any] = None  # type: ignore[assignment]
 
     @property
-    def is_string(self) -> bool:
-        """Whether the attribute is a SCIM string."""
-        target = self.binding.target_type
-        return (
-            target is not None
-            and SchemaAttribute.Type.from_python(target) == SchemaAttribute.Type.string
-        )
-
-    @property
-    def casefolded(self) -> bool:
-        """Whether the values compare without their case."""
-        return self.is_string and not self.binding.case_exact
-
-    @property
-    def nullable(self) -> bool:
-        """Whether the column can hold no value. A hybrid or a column property is taken as nullable."""
-        column = _table_column(self.expression)
-        return column is None or bool(column.nullable)
-
-    @property
-    def required(self) -> bool:
-        """Whether a new record needs a value: the column holds no null, has no default, and the database does not number it."""
-        column = _table_column(self.expression)
-        return column is not None and _needs_value(column)
-
-    @property
-    def enumeration(self) -> SqlEnum | None:
+    def enum_type(self) -> SqlEnum | None:
         """The type of the column when it is an Enum, which stores strings."""
         sql_type = self.expression.type
         return sql_type if isinstance(sql_type, SqlEnum) else None
@@ -355,7 +349,7 @@ class _Column:
         """
         if (
             self.textual
-            or self.enumeration is not None
+            or self.enum_type is not None
             or _uuid_type(self.expression.type) is not None
         ):
             return self.text
@@ -378,94 +372,61 @@ class _Column:
 
 
 @dataclass(eq=False)
-class _Collection:
+class _Collection(core.Collection):
     """A multi-valued attribute, or a complex one, stored in related records.
 
-    The entries of an owned collection belong to the resource. The others are
-    links to the resources of another mapping, the target. A single collection
-    holds one entry at most, such as the manager of a user. A simple
-    collection holds the values of a multi-valued simple attribute, in the
-    column it keeps under None.
-
-    link_type is the type a Link gives its entries, and type_column the
-    constant filters compare it as.
+    relation is the relationship from the resource record to the entries.
     """
 
-    binding: AttributeBinding
-    relationship: InstrumentedAttribute[Any]
-    columns: dict[str | None, _Column] = field(default_factory=dict)
-    resource_type: str | None = None
-    target: "ResourceMapping | None" = None
-    link_type: str | None = None
-    type_column: _Column | None = None
+    @property
+    def relationship(self) -> InstrumentedAttribute[Any]:
+        """The relationship holding the entries."""
+        relationship: InstrumentedAttribute[Any] = self.relation
+        return relationship
 
     @property
-    def owned(self) -> bool:
-        """Whether the entries belong to the resource, rather than link to other resources."""
-        return self.resource_type is None
+    def relationship_property(self) -> RelationshipProperty[Any]:
+        """The property of the relationship holding the entries."""
+        relationship: RelationshipProperty[Any] = self.relationship.property
+        return relationship
 
     @property
     def entry_class(self) -> type[Any]:
         """The SQLAlchemy model of the entries."""
         return self.relationship_property.mapper.class_
 
-    @property
-    def relationship_property(self) -> RelationshipProperty[Any]:
-        """The relationship holding the entries."""
-        return self.relationship.property  # type: ignore[return-value]
-
-    @property
-    def single(self) -> bool:
-        """Whether the collection holds one entry at most."""
-        return not self.binding.is_multivalued
-
-    @property
-    def simple(self) -> bool:
-        """Whether the collection holds the values of a multi-valued simple attribute."""
-        return None in self.columns
-
-    def column(self, sub_field_name: str | None) -> _Column | None:
-        """Return the column of a sub-attribute, or of the values of a simple collection named alone.
-
-        A complex collection named alone has no column.
-        """
-        if sub_field_name == "type" and self.type_column is not None:
-            return self.type_column
-        return self.columns.get(sub_field_name)
-
     def exists(self, condition: Any = None) -> ColumnElement[bool]:
         """Return the condition that an entry exists, and matches condition when given."""
         method = self.relationship.has if self.single else self.relationship.any
-        return method() if condition is None else method(condition)
-
-    @property
-    def writable(self) -> bool:
-        """Whether writing the resource writes these entries."""
-        if self.owned and not any(column.writable for column in self.columns.values()):
-            return False
-        mutability = self.binding.model.get_field_annotation(
-            self.binding.field_name, Mutability
+        exists: ColumnElement[bool] = (
+            method() if condition is None else method(condition)
         )
-        return bool(mutability != Mutability.read_only)
+        return exists
 
 
-class ResourceMapping:
+class ResourceMapping(core.ResourceMapping):
     """How the resources of a SCIM model are stored in the records of a SQLAlchemy model.
 
-    The paths are checked against the SCIM model when the mapping is created,
-    so a mistake raises at import time rather than at the first request.
+    The paths and the columns are checked when the mapping is created, so a
+    mistake raises at import time rather than at the first request.
 
     :param model: The SCIM model of the resources, such as
         ``User[EnterpriseUser]``.
     :param record: The SQLAlchemy model of the records.
     :param attributes: The attributes, by SCIM path. A value is a column, a
-        :class:`~sqlalchemy.ext.hybrid.hybrid_property`, an :class:`Attribute`, a :class:`Many`, a
-        :class:`Link`, or a list of :class:`Link`. ``id``, ``meta.created`` and ``meta.lastModified``
-        are required.
+        :class:`~sqlalchemy.ext.hybrid.hybrid_property`, an
+        :class:`Attribute`, a :class:`Many`, an :class:`Entry`, a
+        :class:`Link`, or a list of :class:`Link`. ``id`` is required.
+        ``meta.created`` and ``meta.lastModified`` are filled by the storage:
+        without them, the resources have no such date.
     :param version: The ``version_id_col`` of the mapper of ``record``, which
         gives ``meta.version`` (:ref:`sqlalchemy:mapper_version_counter`).
         It only changes when the record changes, not when a linked record
-        does: adding a member to a group leaves the version of the user as it is.
+        does: adding a member to a group leaves the version of the user as it
+        is. Without it, ``meta.version`` is a hash of the whole resource,
+        which the storage computes with its ``version_key``. The storage then
+        reads every collection of a resource, even those a response leaves
+        out, such as the members of a group.
     :raises ValueError: When a path is not valid for the model, when a
         value does not fit the attribute of its path, or when ``id`` is mapped
         to a column that can hold ``NULL``. Also when clients could neither
@@ -477,7 +438,10 @@ class ResourceMapping:
     never writes.
     """
 
-    _REQUIRED = ("id", "meta.created", "meta.lastModified")
+    version: Any
+    _id: _Column
+    _created: _Column | None
+    _last_modified: _Column | None
 
     def __init__(
         self,
@@ -485,84 +449,234 @@ class ResourceMapping:
         record: type[Any],
         attributes: Mapping[str, Any],
         *,
-        version: Any,
+        version: Any = None,
     ) -> None:
-        self.model = model
-        self.record = record
-        self._columns: dict[tuple[type[BaseModel], str, str | None], _Column] = {}
-        self._collections: dict[tuple[type[BaseModel], str], list[_Collection]] = {}
+        super().__init__(model, record, attributes, version=version)
+        problems = self._resolve()
+        errors = [problem.message for problem in problems if problem.level == "error"]
+        if errors:
+            raise ValueError("\n".join(errors))
+        for problem in problems:
+            warnings.warn(problem.message, stacklevel=2)
 
-        declared: dict[tuple[type[BaseModel], str, str | None], str] = {}
-        for path, value in attributes.items():
-            binding = self._resolve(path)
-            key = _key(binding)
-            for other, other_path in declared.items():
-                if _overlap(key, other):
-                    raise ValueError(
-                        f"{other_path!r} and {path!r} map the same attribute"
-                    )
-            declared[key] = path
-            self._add(path, binding, value)
-        for required in self._REQUIRED:
-            if _key(self._resolve(required)) not in declared:
-                raise ValueError(f"The mapping of {model.__name__} needs {required!r}")
+    def schemas(self) -> list[Schema]:
+        """Return the schemas of the resources, restricted to what the mapping stores.
 
-        mapper: Mapper[Any] = inspect(record)
-        columns = getattr(getattr(version, "property", None), "columns", [None])
-        if mapper.version_id_col is None or mapper.version_id_col is not columns[0]:
+        They hold the mapped attributes only. An attribute the mapping reads
+        but never writes is ``readOnly``. An attribute whose column cannot be
+        ``NULL`` and has no default is ``required``, unless clients never read
+        it back. A column with a default that cannot be ``NULL`` leaves its
+        attribute optional, but its value cannot be removed. Publish them,
+        rather than the schemas of :attr:`model`, so that clients know what
+        the server stores: build the provider of the server with
+        :meth:`ScimProvider.from_discovery <scim2_models.ScimProvider.from_discovery>`,
+        and pass it to the storage.
+
+        :returns: The schema of the resource, then the schemas of its extensions.
+        """
+        return super().schemas()
+
+    def _loader_options(
+        self, collections: Iterable[core.Collection]
+    ) -> list[strategy_options._AbstractLoad]:
+        """Return the options loading collections along with the records.
+
+        Loading them up front is what lets an asynchronous session read them.
+        """
+        return [
+            strategy_options.selectinload(collection.relation)
+            for collection in collections
+        ]
+
+    def _is_target(self, value: Any) -> bool:
+        return isinstance(getattr(value, "key", None), str) and hasattr(value, "class_")
+
+    def _value_writable(self, value: Any) -> bool:
+        expression = value.target if isinstance(value, core.Attribute) else value
+        mapper: Mapper[Any] = inspect(expression.class_)
+        descriptor = mapper.all_orm_descriptors[expression.key]
+        mapped = mapper.columns.get(expression.key)
+        return super()._value_writable(value) and _writes(descriptor, mapped)
+
+    def _check_declared(
+        self,
+        path: str,
+        binding: AttributeBinding,
+        value: Any,
+        holder: core.Many | core.Entry | None,
+    ) -> None:
+        """Refuse a Hashed column that clients would read, or that would be immutable."""
+        expression = value.target if isinstance(value, core.Attribute) else value
+        if not isinstance(getattr(expression, "type", None), Hashed):
+            return
+        concealed = never_returned(binding) or Mutability.write_only in mutabilities(
+            binding
+        )
+        if not concealed:
             raise ValueError(
-                f"The version of {model.__name__} must be the version_id_col "
-                f"of the mapper of {record.__name__}"
+                f"{path!r} stores a hash, which clients would read: map it to an "
+                "attribute that the schema makes writeOnly or never returns"
             )
-        self._version: InstrumentedAttribute[Any] = version
-        self._id = self._column("id")
+        if _immutable(binding):
+            raise ValueError(
+                f"{path!r} is immutable, so a client sending its value again "
+                "must match the stored one, which a hash never does"
+            )
+
+    def _build_column(
+        self,
+        path: str,
+        binding: AttributeBinding,
+        value: Any,
+        owner: core.Collection | None,
+    ) -> Problems:
+        """Build the column of an attribute, and decide whether it is written.
+
+        A read-only attribute, a hybrid property without a setter, or a
+        computed column, is never written.
+        """
+        expression = value.target if isinstance(value, core.Attribute) else value
+        writable = Mutability.read_only not in mutabilities(
+            binding
+        ) and self._value_writable(value)
+        column = _Column(
+            binding,
+            expression.key,
+            writable,
+            expression=expression,
+        )
+        is_id = owner is None and key(binding) == key(self._resolve_path("id"))
+        python_type = _python_type(expression)
+        if (
+            column.is_string
+            and column.enum_type is None
+            and python_type is not None
+            and not issubclass(python_type, (str, bytes))
+            and not is_id
+        ):
+            yield MappingProblem(
+                "error",
+                "not-text",
+                f"{path!r} holds strings, but its column holds "
+                f"{python_type.__name__} values: map it to a property whose "
+                "expression casts the column to a string",
+            )
+            return None
+
+        table_column = _table_column(expression)
+        column.nullable = table_column is None or bool(table_column.nullable)
+        column.needs_value = table_column is not None and _needs_value(table_column)
+        if column.enum_type is not None:
+            column.enumeration = list(column.enum_type.enums)
+        if owner is None and table_column is not None:
+            column.stores = _column_name(table_column)
+        if is_id:
+            column.textual = not _holds_text(expression)
+            column.keyed = column.textual
+        return column
+
+    def _build_collection(
+        self,
+        path: str,
+        binding: AttributeBinding,
+        declaration: core.Many | core.Link,
+    ) -> Problems:
+        """Build the collection of a relationship, holding as many records as the attribute holds entries."""
+        collection = _Collection(binding, declaration.relation)
+        relationship = collection.relationship_property
+        if relationship.uselist == collection.single:
+            yield MappingProblem(
+                "error",
+                "relation-kind",
+                f"{path!r} holds {'one entry' if collection.single else 'several entries'}, "
+                f"but its relationship holds {'several' if collection.single else 'one'}",
+            )
+            return None
+
+        if isinstance(declaration, core.Many):
+            if not relationship.cascade.delete_orphan:
+                yield MappingProblem(
+                    "error",
+                    "relation-kind",
+                    f"The relationship of {path!r} needs the delete-orphan cascade",
+                )
+                return None
+            return collection
+
+        writable = _sql_writable(binding)
+        if (
+            relationship.direction is ONETOMANY
+            and writable
+            and any(not column.nullable for column in relationship.remote_side)
+        ):
+            yield MappingProblem(
+                "error",
+                "relation-kind",
+                f"Removing a link of {path!r} writes NULL in the foreign key "
+                "of the linked record, so it must accept NULL",
+            )
+            return None
+
+        if relationship.direction is MANYTOONE and writable:
+            collection.nullable = all(
+                column.nullable for column in relationship.local_columns
+            )
+        return collection
+
+    def _check_record(self) -> Problems:
+        """Refuse an identifier column that can hold NULL, and a version that is not the version counter of the mapper."""
         column = _table_column(self._id.expression)
         if column is not None and column.nullable:
-            raise ValueError(
+            yield MappingProblem(
+                "error",
+                "id",
                 "'id' is mapped to a column that can hold no value, "
-                "but each resource needs one"
+                "but each resource needs one",
             )
-        self._id.textual = not _holds_text(self._id.expression)
-        self._created = self._column("meta.created")
-        self._last_modified = self._column("meta.lastModified")
-        self._warn_unwritten()
-
-    def _always_held(self, binding: AttributeBinding) -> bool:
-        """Tell whether the schema makes every resource hold an attribute, and the extension holding it."""
-        if Required.true not in (
-            binding.model.get_field_annotation(binding.field_name, Required),
-            binding.get_annotation(Required),
-        ):
-            return False
-        if binding.model not in self.model.get_extension_models().values():
-            return True
-        required = self.model.get_field_annotation(binding.model.__name__, Required)
-        return bool(required == Required.true)
-
-    def _warn_unwritten(self) -> None:
-        """Warn about the columns of the record that need a value the storage never writes."""
-        written: list[Any] = [
-            _table_column(mapped.expression)
-            for mapped in self._columns.values()
-            if mapped.writable or mapped in (self._created, self._last_modified)
-        ]
+        if self.version is None:
+            return
         mapper: Mapper[Any] = inspect(self.record)
-        # The setter of a property may write any column its expression reads.
+        columns = getattr(getattr(self.version, "property", None), "columns", [None])
+        if mapper.version_id_col is None or mapper.version_id_col is not columns[0]:
+            yield MappingProblem(
+                "error",
+                "version",
+                f"The version of {self.model.__name__} must be the version_id_col "
+                f"of the mapper of {self.record.__name__}",
+            )
+            return
+        if self._last_modified is None and mapper.version_id_generator is False:
+            yield MappingProblem(
+                "error",
+                "version",
+                f"The mapping of {self.model.__name__} has no 'meta.lastModified', "
+                "so the storage counts the writes in its version, which the "
+                "database cannot generate",
+            )
+
+    def _fields_needing_value(self) -> Iterable[str]:
+        """Return the columns of the record that need a value the storage never writes by itself.
+
+        The setter of a property may write any column its expression reads.
+        SQLAlchemy fills the version, the discriminator of the classes, and
+        the key each joined table shares with the table it inherits from.
+        """
+        dates = (self._created, self._last_modified)
+        written: list[Any] = []
+        mapper: Mapper[Any] = inspect(self.record)
         for mapped in self._columns.values():
             descriptor = mapper.all_orm_descriptors.get(mapped.key)
-            # The storage sets the dates itself, read-only as they are.
-            dated = mapped in (self._created, self._last_modified)
-            if (mapped.writable or dated) and isinstance(descriptor, hybrid_property):
+            if (mapped.writable or mapped in dates) and isinstance(
+                descriptor, hybrid_property
+            ):
                 written += [
                     element.table.columns.get(element.key)
-                    for element in iterate(mapped.expression.__clause_element__())
+                    for element in iterate(mapped.expression.__clause_element__())  # type: ignore[attr-defined]
                     if isinstance(element, Column)
                 ]
         for collection in self._all_collections():
             if collection.single and not collection.owned and collection.writable:
-                written += collection.relationship_property.local_columns
-        # SQLAlchemy fills the version, the discriminator of the classes, and
-        # the key each joined table shares with the table it inherits from.
+                written += collection.relationship_property.local_columns  # type: ignore[attr-defined]
         written += [mapper.version_id_col, mapper.polymorphic_on]
         for ancestor in mapper.iterate_to_root():
             if ancestor.inherits is not None:
@@ -571,561 +685,42 @@ class ResourceMapping:
                     for column in ancestor.local_table.primary_key
                     if column.foreign_keys
                 ]
-        for column in mapper.columns:
-            if (
-                not isinstance(column, Column)
-                or not _needs_value(column)
-                or any(column is other for other in written)
-            ):
-                continue
-            warnings.warn(
-                f"The column {column.table.name}.{column.name} needs a value, "
-                f"but the mapping of {self.model.__name__} never writes it: "
-                "map it, or give it a default",
-                stacklevel=3,
-            )
+        return [
+            _column_name(column)
+            for column in mapper.columns
+            if isinstance(column, Column)
+            and _needs_value(column)
+            and not any(column is other for other in written)
+        ]
 
-    def schemas(self) -> list[Schema]:
-        """Return the schemas of the resources, restricted to what the mapping stores.
+    def _links_to(self, collection: core.Collection, target: Any) -> bool:
+        return bool(collection.entry_class is target.record)  # type: ignore[attr-defined]
 
-        They hold the mapped attributes only. An attribute the mapping reads
-        but never writes is ``readOnly``, and an attribute it writes but never
-        reads is ``writeOnly``. An attribute whose column cannot be ``NULL``
-        and has no default is ``required``, unless it is write-only. A column
-        with a default that cannot be ``NULL`` leaves its attribute optional,
-        but its value cannot be removed. Publish them, rather than the
-        schemas of :attr:`model`, so that clients know what the server stores:
-        build the provider of the server with
-        :meth:`ScimProvider.from_discovery <scim2_models.ScimProvider.from_discovery>`,
-        and pass it to the storage.
-
-        :returns: The schema of the resource, then the schemas of its extensions.
-        """
-        models: list[Any] = [self.model, *self.model.get_extension_models().values()]
-        return [self._restrict(model.to_schema()) for model in models]
-
-    def _restrict(self, schema: Schema) -> Schema:
-        """Return a schema with the attributes the mapping stores only."""
-        attributes = []
-        for attribute in schema.attributes or []:
-            restricted = self._restrict_attribute(
-                f"{schema.id}:{attribute.name}", attribute
-            )
-            if restricted is not None:
-                attributes.append(restricted)
-        return schema.model_copy(update={"attributes": attributes})
-
-    def _restrict_attribute(self, urn: str, attribute: Any) -> Any:
-        """Return an attribute of a schema as the mapping stores it, or None when it stores nothing of it."""
-        if attribute.sub_attributes:
-            sub_attributes = [
-                restricted
-                for sub_attribute in attribute.sub_attributes
-                if (
-                    restricted := self._restrict_attribute(
-                        f"{urn}.{sub_attribute.name}", sub_attribute
-                    )
-                )
-                is not None
-            ]
-            if not sub_attributes:
-                return None
-            written = any(
-                sub_attribute.mutability != Mutability.read_only
-                for sub_attribute in sub_attributes
-            )
-            required = attribute.required
-            if any(
-                self._always_needs(f"{urn}.{sub_attribute.name}", entries=False)
-                for sub_attribute in sub_attributes
-            ):
-                required = Required.true
-            mutability = attribute.mutability if written else Mutability.read_only
-            returned = attribute.returned
-            if all(sub.returned == Returned.never for sub in sub_attributes):
-                returned = Returned.never
-                required = Required.false
-                if mutability == Mutability.read_write:
-                    mutability = Mutability.write_only
-            return attribute.model_copy(
-                update={
-                    "sub_attributes": sub_attributes,
-                    "mutability": mutability,
-                    "required": required,
-                    "returned": returned,
-                }
-            )
-
-        storage = self._storage(urn)
-        if storage is None:
+    def _read(self, column: core.Column, record: Any) -> Any:
+        """Return the SCIM value of a column of a record."""
+        value = getattr(record, column.key)
+        if value is None:
             return None
-        columns = self._columns_of(urn, entries=True)
-        if storage == _Storage.written and any(c.concealed for c in columns):
-            mutability = Mutability.write_only
-            if any(c.immutable for c in columns):
-                mutability = Mutability.immutable
-            return attribute.model_copy(
-                update={
-                    "mutability": mutability,
-                    "returned": Returned.never,
-                    "required": Required.false,
-                }
-            )
-        if self._always_needs(urn):
-            return attribute.model_copy(update={"required": Required.true})
-        if storage in (_Storage.written, _Storage.link_type):
-            return attribute
-        if storage == _Storage.ref:
-            linked = self._linked_resource_types(urn)
-            return attribute.model_copy(update={"reference_types": linked})
-        return attribute.model_copy(update={"mutability": Mutability.read_only})
+        enum_type = column.enum_type  # type: ignore[attr-defined]
+        if isinstance(value, Enum) and enum_type is not None:
+            return column.stored_string(enum_type, value)  # type: ignore[attr-defined]
+        return _as_scim(value)
 
-    def _storage(self, urn: str) -> _Storage | None:
-        """Return how the mapping stores the attribute of a URN, or None when it does not store it."""
-        key = urn.lower()
-        for column in self._columns.values():
-            if column.binding.urn.lower() == key:
-                return _Storage.written if column.writable else _Storage.read_only
-        for collection in self._all_collections():
-            if not collection.owned:
-                head = collection.binding.urn.lower()
-                if key == f"{head}.value":
-                    return _Storage.written
-                if key in (f"{head}.display", f"{head}.displayname"):
-                    return _Storage.derived
-                if key == f"{head}.$ref":
-                    return _Storage.ref
-                if key == f"{head}.type" and collection.link_type is not None:
-                    return _Storage.link_type
-                continue
-            for column in collection.columns.values():
-                if column.binding.urn.lower() == key:
-                    return _Storage.written if column.writable else _Storage.read_only
-        return None
+    def _related(self, collection: core.Collection, record: Any) -> list[Any]:
+        """Return the records a collection of a record holds, as a list even for a single one."""
+        related = getattr(record, collection.relation.key)
+        if collection.single:
+            return [] if related is None else [related]
+        return list(related)
 
-    def _columns_of(self, urn: str, *, entries: bool) -> list[_Column]:
-        """Return the columns of an attribute, with the columns of the entries when entries is True."""
-        key = urn.lower()
-        columns = list(self._columns.values())
-        if entries:
-            columns += [
-                column
-                for collection in self._all_collections()
-                if collection.owned and not collection.simple
-                for column in collection.columns.values()
-            ]
-        return [column for column in columns if column.binding.urn.lower() == key]
+    def _counter(self, record: Any) -> Any:
+        return getattr(record, self.version.key)
 
-    def _nullable(self, urn: str) -> bool:
-        """Tell whether the column of an attribute can hold no value, True for an attribute without column."""
-        return all(c.nullable for c in self._columns_of(urn, entries=False))
+    def _holds_id(self, record: Any, value: str) -> bool:
+        return bool(getattr(record, self._id.key) == _as_key(self._id, value))
 
-    def _required(self, urn: str) -> bool:
-        """Tell whether a new record needs a value for the column of an attribute."""
-        return any(c.required for c in self._columns_of(urn, entries=False))
 
-    def _always_needs(self, urn: str, *, entries: bool = True) -> bool:
-        """Tell whether a resource, or an entry when entries is True, always needs a value for an attribute.
-
-        This holds for a column that needs a value, that the storage writes, and
-        that clients read back. A concealed value is kept when a replacement
-        leaves it out, so a replacement does not need it.
-        """
-        return any(
-            column.required and column.writable and not column.concealed
-            for column in self._columns_of(urn, entries=entries)
-        )
-
-    def _linked_resource_types(self, urn: str) -> list[str]:
-        """Return the resource types the Links of an attribute link to, from the URN of its $ref."""
-        head = urn.lower().removesuffix(".$ref")
-        return [
-            collection.resource_type
-            for collection in self._all_collections()
-            if collection.binding.urn.lower() == head
-            and collection.resource_type is not None
-        ]
-
-    def _all_collections(self) -> Iterator[_Collection]:
-        """Yield the collections of every attribute, each Link of an attribute being a collection."""
-        for collections in self._collections.values():
-            yield from collections
-
-    def _column(self, path: str) -> _Column:
-        """Return the column of the attribute at a path."""
-        return self._columns[_key(self._resolve(path))]
-
-    def _lookup(
-        self, binding: AttributeBinding
-    ) -> list[tuple[_Collection | None, _Column | None]]:
-        """Return each collection holding an attribute, if any, with the column of the attribute in it.
-
-        An attribute outside collections gives one pair, without collection.
-        An attribute linking to several resource types gives a pair for each
-        of its Links. The column is None for an attribute stored nowhere, and
-        for a collection named alone, such as emails.
-        """
-        collections = self._collections.get((binding.model, binding.field_name))
-        if collections is None:
-            return [(None, self._columns.get(_key(binding)))]
-        return [
-            (collection, collection.column(binding.sub_field_name))
-            for collection in collections
-        ]
-
-    def _sub_columns(self, binding: AttributeBinding) -> list[_Column]:
-        """Return the mapped sub-attributes of a complex attribute holding a single value."""
-        return [
-            column
-            for (model, field_name, sub_field_name), column in self._columns.items()
-            if model is binding.model
-            and field_name == binding.field_name
-            and sub_field_name is not None
-        ]
-
-    def _string_columns(self) -> Iterator[_Column]:
-        """Yield the columns holding strings, those of the collections included."""
-        for column in self._columns.values():
-            if column.is_string:
-                yield column
-        for collection in self._all_collections():
-            for column in collection.columns.values():
-                if column.is_string:
-                    yield column
-            if collection.type_column is not None:
-                yield collection.type_column
-
-    def _unique_columns(self) -> Iterator[_Column]:
-        """Yield the columns whose values no two resources share, except those clients never read back."""
-        for column in self._columns.values():
-            if not column.concealed and column.binding.get_annotation(Uniqueness) in (
-                Uniqueness.server,
-                Uniqueness.global_,
-            ):
-                yield column
-
-    def _returned_collections(
-        self, parameters: ResponseParameters[Any] | None = None
-    ) -> list[_Collection]:
-        """Return the collections a response keeps, all of them without parameters."""
-        collections = list(self._all_collections())
-        if parameters is None:
-            return collections
-        paths = Path[self.model].iter_paths(  # type: ignore[name-defined]
-            include_subattributes=False,
-            attributes=parameters.attributes,
-            excluded_attributes=parameters.excluded_attributes,
-        )
-        bindings = (path.resolve() for path in paths)
-        kept = {binding.urn for binding in bindings if binding is not None}
-        return [
-            collection for collection in collections if collection.binding.urn in kept
-        ]
-
-    def _loader_options(
-        self, collections: Iterable[_Collection]
-    ) -> list[strategy_options._AbstractLoad]:
-        """Return the options loading collections along with the records.
-
-        Loading them up front is what lets an asynchronous session read them.
-        """
-        return [
-            strategy_options.selectinload(collection.relationship)
-            for collection in collections
-        ]
-
-    def _targets(
-        self, mappings: Mapping[str, "ResourceMapping"]
-    ) -> list[tuple[_Collection, "ResourceMapping"]]:
-        """Return each Link with the mapping of the resources it links to.
-
-        Several storages may share a mapping, as long as they link it to the
-        same mappings.
-        """
-        return [
-            (collection, self._target(collection, mappings))
-            for collection in self._all_collections()
-            if not collection.owned
-        ]
-
-    def _bind(self, links: list[tuple[_Collection, "ResourceMapping"]]) -> None:
-        """Bind each Link to the mapping :meth:`_targets` returned for it."""
-        for collection, target in links:
-            collection.target = target
-            collection.columns = {}
-            head = collection.binding.urn
-            concealed = _conceals(collection.binding)
-            for binding, column in (
-                (self._resolve(f"{head}.value"), target._id),
-                (
-                    self._find(f"{head}.display") or self._find(f"{head}.displayName"),
-                    target._display(),
-                ),
-            ):
-                if binding is None or column is None:
-                    continue
-                collection.columns[binding.sub_field_name] = _Column(
-                    binding,
-                    column.expression,
-                    column.key,
-                    False,
-                    column.textual,
-                    concealed=concealed or _conceals(binding),
-                )
-
-    def _target(
-        self, collection: _Collection, mappings: Mapping[str, "ResourceMapping"]
-    ) -> "ResourceMapping":
-        """Return the mapping a Link links to, refusing one that does not fit it."""
-        target = mappings.get(collection.resource_type)  # type: ignore[arg-type]
-        if target is None:
-            raise ValueError(
-                f"No mapping for the resource type {collection.resource_type!r}"
-            )
-        if collection.target is not None and collection.target is not target:
-            raise ValueError(
-                f"{collection.binding.urn!r} already links to another mapping "
-                f"of {collection.resource_type!r}: a mapping serves storages "
-                "sharing the same mappings"
-            )
-        return target
-
-    def _display(self) -> _Column | None:
-        """Return the column a link to these resources displays."""
-        for path in ("displayName", "userName"):
-            binding = self._find(path)
-            if binding is None:
-                continue
-            ((_, column),) = self._lookup(binding)
-            if column is not None and not column.concealed:
-                return column
-        return None
-
-    def _find(self, path: str) -> AttributeBinding | None:
-        """Return the attribute at a path, or None if the model has none there."""
-        return Path[self.model](path).resolve()  # type: ignore[name-defined]
-
-    def _resolve(self, path: str) -> AttributeBinding:
-        """Return the attribute at a path, refusing a path the model does not know."""
-        binding = self._find(path)
-        if binding is None:
-            raise ValueError(f"{path!r} is not an attribute of {self.model.__name__}")
-        return binding
-
-    def _add(self, path: str, binding: AttributeBinding, value: Any) -> None:
-        """Check the mapping of the attribute at a path, and keep its column or its collections."""
-        target = binding.target_type
-        is_complex = isclass(target) and issubclass(target, BaseModel)
-
-        key = (binding.model, binding.field_name)
-        if isinstance(value, Many):
-            self._collections[key] = [self._many(path, binding, value)]
-            return
-        if isinstance(value, Link):
-            value = [value]
-        if isinstance(value, list) and all(isinstance(item, Link) for item in value):
-            if not is_complex or binding.sub_field_name is not None:
-                raise ValueError(
-                    f"{path!r} is not a complex attribute of {self.model.__name__}"
-                )
-            self._collections[key] = self._links(path, binding, value)
-            return
-
-        if binding.is_multivalued or is_complex:
-            raise ValueError(
-                f"{path!r} holds several values or sub-attributes: map it with Many "
-                "or Link, or map its sub-attributes"
-            )
-        self._columns[_key(binding)] = self._build_column(path, binding, value)
-
-    def _collection(
-        self, path: str, binding: AttributeBinding, relationship: Any
-    ) -> _Collection:
-        """Build the collection of a relationship, holding as many records as the attribute holds entries."""
-        collection = _Collection(binding, relationship)
-        if collection.relationship_property.uselist == collection.single:
-            raise ValueError(
-                f"{path!r} holds {'one entry' if collection.single else 'several entries'}, "
-                f"but its relationship holds {'several' if collection.single else 'one'}"
-            )
-        return collection
-
-    def _many(self, path: str, binding: AttributeBinding, many: Many) -> _Collection:
-        """Build the collection of a Many, with the columns of its entries, or the column of its values."""
-        target = binding.target_type
-        is_complex = isclass(target) and issubclass(target, BaseModel)
-        simple = not isinstance(many.attributes, Mapping)
-        if (
-            binding.sub_field_name is not None
-            or not binding.is_multivalued
-            or is_complex == simple
-        ):
-            kind = "simple" if simple else "complex"
-            raise ValueError(
-                f"{path!r} is not a multi-valued {kind} attribute of "
-                f"{self.model.__name__}"
-            )
-        collection = self._collection(path, binding, many.relationship)
-        if not collection.relationship_property.cascade.delete_orphan:
-            raise ValueError(
-                f"The relationship of {path!r} needs the delete-orphan cascade"
-            )
-        paths: dict[str | None, str] = {}
-        if simple:
-            collection.columns[None] = self._build_column(
-                path, binding, many.attributes
-            )
-        for sub_path, expression in ({} if simple else many.attributes).items():
-            sub_binding = self._resolve(f"{path}.{sub_path}")
-            if sub_binding.sub_field_name in paths:
-                raise ValueError(
-                    f"{paths[sub_binding.sub_field_name]!r} and "
-                    f"'{path}.{sub_path}' map the same attribute"
-                )
-            paths[sub_binding.sub_field_name] = f"{path}.{sub_path}"
-            collection.columns[sub_binding.sub_field_name] = self._build_column(
-                f"{path}.{sub_path}", sub_binding, expression
-            )
-
-        columns = collection.columns.values()
-        if any(column.concealed for column in columns):
-            raise ValueError(
-                f"Writing {path!r} replaces its entries, so they cannot hold "
-                "write-only values, nor values clients never read back"
-            )
-        if len({column.writable for column in columns}) > 1:
-            raise ValueError(
-                f"Writing {path!r} replaces its entries, "
-                "so its sub-attributes are either all written or all read-only"
-            )
-        return collection
-
-    def _links(
-        self, path: str, binding: AttributeBinding, links: list[Link]
-    ) -> list[_Collection]:
-        """Build the collections of the Links of an attribute, one per resource type.
-
-        The type of the entries is compared, in filters, as a constant of each
-        Link.
-        """
-        resource_types = [link.resource_type for link in links]
-        if not links or len(set(resource_types)) != len(resource_types):
-            raise ValueError(
-                f"{path!r} needs one Link per resource type, and at least one"
-            )
-        if not binding.is_multivalued and len(links) > 1:
-            raise ValueError(f"{path!r} holds one value, so it is mapped to one Link")
-        typed = {link.type is not None for link in links}
-        if len(typed) > 1:
-            raise ValueError(f"Either every Link of {path!r} has a type, or none")
-        type_binding = self._find(f"{path}.type")
-        if typed == {True} and type_binding is None:
-            raise ValueError(f"{path!r} has no type sub-attribute")
-
-        collections = []
-        for link in links:
-            collection = self._collection(path, binding, link.relationship)
-            collection.resource_type = link.resource_type
-            relationship = collection.relationship_property
-            if (
-                relationship.direction is MANYTOONE
-                and collection.writable
-                and not self._always_held(binding)
-                and any(not column.nullable for column in relationship.local_columns)
-            ):
-                raise ValueError(
-                    f"{path!r} can be removed, so the foreign key of its "
-                    "relationship must accept NULL"
-                )
-            if (
-                relationship.direction is ONETOMANY
-                and collection.writable
-                and any(not column.nullable for column in relationship.remote_side)
-            ):
-                raise ValueError(
-                    f"Removing a link of {path!r} writes NULL in the foreign key "
-                    "of the linked record, so it must accept NULL"
-                )
-            if link.type is not None:
-                collection.link_type = link.type
-                collection.type_column = _Column(
-                    type_binding,  # type: ignore[arg-type]
-                    literal(link.type),
-                    "type",
-                    False,
-                    concealed=_conceals(binding) or _conceals(type_binding),  # type: ignore[arg-type]
-                )
-            collections.append(collection)
-        return collections
-
-    def _build_column(
-        self, path: str, binding: AttributeBinding, value: Any
-    ) -> _Column:
-        """Build the column of an attribute, and decide whether it is written.
-
-        A read-only attribute, a hybrid property without a setter, or a
-        computed column, is never written.
-        """
-        if binding.sub_field_name is not None and binding.target_is_multivalued:
-            raise ValueError(
-                f"{path!r} holds several values in a complex attribute, "
-                "which the storage cannot map"
-            )
-        attribute = value if isinstance(value, Attribute) else Attribute(value)
-        expression = attribute.expression
-        key = getattr(expression, "key", None)
-        if not isinstance(key, str):
-            raise ValueError(
-                f"{path!r} must be mapped to a column or a hybrid property"
-            )
-        writable = attribute.writable
-        descriptor = inspect(expression.class_).all_orm_descriptors[key]
-        mutabilities = {
-            binding.model.get_field_annotation(binding.field_name, Mutability),
-            binding.get_annotation(Mutability),
-        }
-        mapped = inspect(expression.class_).columns.get(key)
-        if (
-            Mutability.read_only in mutabilities
-            or (isinstance(descriptor, hybrid_property) and descriptor.fset is None)
-            or getattr(mapped, "computed", None) is not None
-        ):
-            writable = False
-        concealed = _conceals(binding)
-        if concealed and not writable:
-            raise ValueError(
-                f"{path!r} would be neither read nor written by clients: check "
-                "its writable flag, the setter of its property, its column, and "
-                "the mutability and the returned of its schema, or leave it out"
-            )
-        hashed = isinstance(getattr(expression, "type", None), Hashed)
-        if hashed and not concealed:
-            raise ValueError(
-                f"{path!r} stores a hash, which clients would read: map it to an "
-                "attribute that the schema makes writeOnly or never returns"
-            )
-        immutable = Mutability.immutable in mutabilities and (
-            Mutability.write_only not in mutabilities
-        )
-        if hashed and immutable:
-            raise ValueError(
-                f"{path!r} is immutable, so a client sending its value again "
-                "must match the stored one, which a hash never does"
-            )
-        column = _Column(
-            binding, expression, key, writable, concealed=concealed, immutable=immutable
-        )
-        python_type = _python_type(expression)
-        if (
-            column.is_string
-            and column.enumeration is None
-            and python_type is not None
-            and not issubclass(python_type, (str, bytes))
-            and _key(binding) != _key(self._resolve("id"))
-        ):
-            raise ValueError(
-                f"{path!r} holds strings, but its column holds "
-                f"{python_type.__name__} values: map it to a property whose "
-                "expression casts the column to a string"
-            )
-        return column
+def _immutable(binding: AttributeBinding) -> bool:
+    """Tell whether the schema keeps a value clients read from changing."""
+    found = mutabilities(binding)
+    return Mutability.immutable in found and Mutability.write_only not in found

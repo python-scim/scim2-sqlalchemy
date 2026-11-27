@@ -1,6 +1,29 @@
 Changelog
 =========
 
+[Unreleased]
+------------
+
+Added
+^^^^^
+- :class:`~scim2_sqlalchemy.Entry` stores a multi-valued attribute holding one entry at most, such
+  as a work email, in columns of the resource record.
+- ``meta.created`` and ``meta.lastModified`` are optional: without them, the resources have no such
+  date.
+- The ``version`` of a :class:`~scim2_sqlalchemy.ResourceMapping` is optional. Without it,
+  ``meta.version`` is a hash of the resource, keyed with the new ``version_key`` of the storages.
+
+Changed
+^^^^^^^
+- Needs scim2-server 0.9.0 or later.
+- The storages are built on the mapping core of scim2-server, :mod:`scim2_server.mapping`, which
+  scim2-django shares. Some error and warning messages of the mappings change.
+- :meth:`~scim2_sqlalchemy.ResourceMapping.schemas` publishes an attribute that is never returned
+  with the mutability of its schema, rather than ``writeOnly``. A hidden sub-attribute of an
+  immutable attribute keeps its own mutability.
+- A :class:`~scim2_sqlalchemy.Link` refuses a relationship to another class than the record of
+  the mapping it links to.
+
 [0.3.0] - 2026-11-26
 --------------------
 

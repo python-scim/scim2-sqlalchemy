@@ -23,6 +23,7 @@ from .models import GROUPS
 from .models import MAPPINGS
 from .models import USERS
 from .models import Base
+from .plain import PLAIN_MAPPINGS  # noqa: F401  The tables of the plain records are created with the others.
 
 DATABASES = (
     ["sqlite"]
@@ -118,9 +119,11 @@ def sync_storage_factory(session):
     The mixins come before the storage class, to override its methods.
     """
 
-    def factory(mappings=MAPPINGS, mixins=(), provider=None):
+    def factory(mappings=MAPPINGS, mixins=(), provider=None, version_key=None):
         storage_class = type("Storage", (*mixins, SqlAlchemyStorage), {})
-        return storage_class(mappings, lambda: session, provider=provider)
+        return storage_class(
+            mappings, lambda: session, provider=provider, version_key=version_key
+        )
 
     return factory
 
@@ -133,9 +136,11 @@ def async_storage_factory(database_url):
         enforce_foreign_keys(engine.sync_engine)
         session = AsyncSession(engine)
 
-        def factory(mappings=MAPPINGS, mixins=(), provider=None):
+        def factory(mappings=MAPPINGS, mixins=(), provider=None, version_key=None):
             storage_class = type("Storage", (*mixins, AsyncSqlAlchemyStorage), {})
-            storage = storage_class(mappings, lambda: session, provider=provider)
+            storage = storage_class(
+                mappings, lambda: session, provider=provider, version_key=version_key
+            )
             return BlockingStorage(storage, runner)
 
         yield factory

@@ -13,6 +13,8 @@ generating them from the resource types.
 
 .. autoclass:: scim2_sqlalchemy.Many
 
+.. autoclass:: scim2_sqlalchemy.Entry
+
 .. autoclass:: scim2_sqlalchemy.Link
 
 .. autofunction:: scim2_sqlalchemy.generate_mappings

@@ -1,37 +1,15 @@
-import base64
 import datetime
 from collections.abc import Iterable
 from collections.abc import Mapping
 from enum import Enum
-from inspect import isclass
 from typing import Any
 
-from pydantic import BaseModel
-from scim2_models import AttributeBinding
-from scim2_models import InvalidValueException
-from scim2_models import Meta
-from scim2_models import Mutability
-from scim2_models import MutabilityException
-from scim2_models import Path
 from scim2_models import Resource
+from scim2_server.mapping import conversion as core
+from scim2_server.mapping.descriptors import Collection
 
 from .mapping import ResourceMapping
 from .mapping import _Collection
-from .mapping import _Column
-from .mapping import _Storage
-
-
-def _as_scim(value: Any) -> Any:
-    """Return a value read from the database in the form SCIM holds it.
-
-    A date without a time zone is taken as UTC, since SQLite drops the zone.
-    Binary values are encoded in base64, the form the models decode them from.
-    """
-    if isinstance(value, datetime.datetime) and value.tzinfo is None:
-        return value.replace(tzinfo=datetime.UTC)
-    if isinstance(value, bytes):
-        return base64.b64encode(value).decode()
-    return value
 
 
 def _as_stored(value: Any) -> Any:
@@ -43,28 +21,14 @@ def _as_stored(value: Any) -> Any:
     return value
 
 
-def _read(column: _Column, record: Any) -> Any:
-    """Return the SCIM value of a column of a record."""
-    value = getattr(record, column.key)
-    if value is None:
-        return None
-    if isinstance(value, Enum) and column.enumeration is not None:
-        return column.stored_string(column.enumeration, value)
-    return _as_scim(value)
-
-
-def _version(mapping: ResourceMapping, record: Any) -> str:
-    """Return the weak ETag of the version of a record."""
-    return f'W/"{getattr(record, mapping._version.key)}"'
-
-
 def _to_scim(
     mapping: ResourceMapping,
     record: Any,
     resource_type: str,
     model: type[Resource[Any]],
     endpoints: Mapping[str, str],
-    collections: Iterable[_Collection],
+    collections: Iterable[Collection],
+    version_key: bytes | None,
 ) -> Resource[Any]:
     """Build the resource a record stores, as an instance of model.
 
@@ -76,80 +40,16 @@ def _to_scim(
     by name: a link to one of them gets a $ref relative to the SCIM root, when
     model declares it, which the server makes absolute (RFC 7643 §2.3.7).
     """
-    resource = model()
-    special = (mapping._id, mapping._created, mapping._last_modified)
-    for column in mapping._columns.values():
-        if column in special:
-            continue
-        value = _read(column, record)
-        if value is not None:
-            Path[model](column.binding.urn).set(resource, value)  # type: ignore[valid-type]
-
-    read: dict[str, tuple[bool, list[dict[str, Any]]]] = {}
-    for collection in collections:
-        endpoint = None
-        if Path[model](f"{collection.binding.urn}.$ref").resolve() is not None:  # type: ignore[valid-type]
-            endpoint = endpoints.get(collection.resource_type)  # type: ignore[arg-type]
-        _, entries = read.setdefault(collection.binding.urn, (collection.single, []))
-        for related in _related(collection, record):
-            entry = _read_entry(collection, related, endpoint)
-            if entry is not None:
-                entries.append(entry)
-    for urn, (single, entries) in read.items():
-        if entries:
-            Path[model](urn).set(resource, entries[0] if single else entries)  # type: ignore[valid-type]
-
-    resource.id = str(_read(mapping._id, record))
-    resource.meta = Meta(
-        resource_type=resource_type,
-        created=_read(mapping._created, record),
-        last_modified=_read(mapping._last_modified, record),
-        version=_version(mapping, record),
+    return core.to_scim(
+        mapping, record, resource_type, model, endpoints, collections, version_key
     )
-    return model.model_validate(resource.model_dump())
-
-
-def _related(collection: _Collection, record: Any) -> list[Any]:
-    """Return the records a collection of a record holds, as a list even for a single one."""
-    related = getattr(record, collection.relationship.key)
-    if collection.single:
-        return [] if related is None else [related]
-    return list(related)
-
-
-def _entries(collection: _Collection, resource: Resource[Any]) -> list[Any]:
-    """Return the entries a resource holds for a collection, as a list even for a single one."""
-    value = Path(collection.binding.urn).get(resource, strict=False)
-    if collection.single:
-        return [] if value is None else [value]
-    return list(value or [])
-
-
-def _read_entry(collection: _Collection, entry: Any, endpoint: str | None) -> Any:
-    """Return the values of an entry, by sub-attribute name, or the value of an entry of a simple collection.
-
-    A link gets a $ref when the endpoint of the resources it links to is known.
-    """
-    if collection.simple:
-        return _read(collection.columns[None], entry)
-    values = {}
-    for sub_field_name, column in collection.columns.items():
-        value = _read(column, entry)
-        if value is not None and sub_field_name == "value" and not collection.owned:
-            value = str(value)
-            if endpoint is not None:
-                values["$ref"] = f"{endpoint}/{value}"
-        values[column.binding.urn.rsplit(".", 1)[-1]] = value
-    if collection.link_type is not None:
-        values["type"] = collection.link_type
-    return values
 
 
 def _from_scim(
     mapping: ResourceMapping,
     resource: Resource[Any],
     record: Any,
-    links: dict[_Collection, list[Any]],
+    links: dict[Collection, list[Any]],
     creating: bool,
 ) -> None:
     """Write a resource into a record.
@@ -160,30 +60,22 @@ def _from_scim(
     that the column keeps its default. links holds the records each Link of
     the resource links to.
     """
-    for column in mapping._columns.values():
-        if not column.writable:
-            continue
-        value = Path(column.binding.urn).get(resource, strict=False)
-        if value is None and creating:
-            continue
-        stored = None if value is None else _as_stored(value)
-        if not creating and stored == getattr(record, column.key):
-            continue
-        setattr(record, column.key, stored)
+    for column, value in core.write_plan(mapping, resource, record, creating):
+        setattr(record, column.key, None if value is None else _as_stored(value))
 
     for collection in mapping._all_collections():
         if not collection.writable:
             continue
         if collection.owned:
             value = [
-                _write_entry(collection, entry)
-                for entry in _entries(collection, resource)
+                _write_entry(collection, entry)  # type: ignore[arg-type]
+                for entry in core.entries(collection, resource)
             ]
         elif collection.single:
             value = next(iter(links[collection]), None)
         else:
             value = links[collection]
-        setattr(record, collection.relationship.key, value)
+        setattr(record, collection.relation.key, value)
 
 
 def _write_entry(collection: _Collection, entry: Any) -> Any:
@@ -197,133 +89,3 @@ def _write_entry(collection: _Collection, entry: Any) -> Any:
         if value is not None:
             setattr(record, column.key, _as_stored(value))
     return record
-
-
-def _link_entries(
-    mapping: ResourceMapping, resource: Resource[Any]
-) -> list[tuple[list[_Collection], list[Any]]]:
-    """Return the entries of each written attribute of a resource linking to other resources, with the collections of its Links.
-
-    A link is stored by its value, so an entry without one, such as an entry
-    with a $ref only, raises InvalidValueException rather than being lost.
-    """
-    links = []
-    for collections in mapping._collections.values():
-        collection = collections[0]
-        if collection.owned or not collection.writable:
-            continue
-        entries = _entries(collection, resource)
-        if any(entry.value is None for entry in entries):
-            raise InvalidValueException(
-                detail=f"'{collection.binding.urn}' holds an entry without value"
-            )
-        links.append((collections, entries))
-    return links
-
-
-def _check_storable(
-    mapping: ResourceMapping,
-    resource: Resource[Any],
-    stored: Resource[Any] | None,
-) -> None:
-    """Refuse a change of a resource that the mapping cannot store.
-
-    Each attribute of the resource is compared with the stored resource, None
-    for a new one. A value equal to the stored one changes nothing, so a
-    resource read and sent back is accepted. A missing value changes nothing
-    either, except for a stored value whose column cannot hold none: removing it
-    raises MutabilityException. A new resource needs a value for each column
-    that cannot hold none and has no default. The read-only attributes of the
-    model of the resource are skipped, as RFC 7644 §3.5.1 has them ignored, and
-    so are the derived ones.
-    """
-    _check_entries(mapping, resource)
-    model = type(resource)
-    for path in Path[model].iter_paths():  # type: ignore[valid-type]
-        binding = path.resolve()
-        if binding is None:
-            continue
-        target = binding.target_type
-        if isclass(target) and issubclass(target, BaseModel):
-            continue
-        if Mutability.read_only in (
-            binding.model.get_field_annotation(binding.field_name, Mutability),
-            binding.get_annotation(Mutability),
-        ):
-            continue
-        storage = mapping._storage(binding.urn)
-        value = _comparable(path.get(resource, strict=False))
-        current = None
-        if stored is not None:
-            current = _comparable(Path(binding.urn).get(stored, strict=False))
-        if storage == _Storage.written:
-            _check_enumerated(mapping, binding, value)
-            if value is None and stored is None and mapping._required(binding.urn):
-                raise InvalidValueException(
-                    detail=f"'{binding.urn}' is required on this server"
-                )
-            if (
-                value is None
-                and current is not None
-                and not mapping._nullable(binding.urn)
-            ):
-                raise MutabilityException(
-                    attribute=binding.urn,
-                    detail=f"'{binding.urn}' cannot be removed on this server",
-                )
-            continue
-        if storage in (_Storage.derived, _Storage.ref, _Storage.link_type) or value in (
-            None,
-            current,
-        ):
-            continue
-        if storage == _Storage.read_only:
-            raise MutabilityException(
-                attribute=binding.urn,
-                mutability="readOnly",
-                detail=f"'{binding.urn}' is read-only on this server",
-            )
-        raise InvalidValueException(
-            detail=f"'{binding.urn}' is not stored by this server"
-        )
-
-
-def _check_entries(mapping: ResourceMapping, resource: Resource[Any]) -> None:
-    """Refuse an entry without a value that its column needs, rather than failing in the database."""
-    for collection in mapping._all_collections():
-        if not collection.owned or collection.simple or not collection.writable:
-            continue
-        required = [column for column in collection.columns.values() if column.required]
-        for entry in _entries(collection, resource):
-            for column in required:
-                if getattr(entry, column.binding.target_field_name, None) is None:
-                    raise InvalidValueException(
-                        detail=f"'{column.binding.urn}' is required on this server"
-                    )
-
-
-def _check_enumerated(
-    mapping: ResourceMapping, binding: AttributeBinding, value: Any
-) -> None:
-    """Refuse a string that an Enum column does not store, rather than failing in the database."""
-    _, column = mapping._lookup(binding)[0]
-    if column is None or column.enumeration is None:
-        return
-    stored = column.enumeration.enums
-    for item in value if isinstance(value, list) else [value]:
-        if item is not None and item not in stored:
-            raise InvalidValueException(
-                detail=f"'{binding.urn}' cannot hold {item!r} on this server"
-            )
-
-
-def _comparable(value: Any) -> Any:
-    """Return a value in a form two resources compare in.
-
-    A list of missing values, as a path through the entries of a multi-valued
-    attribute gives, is no value.
-    """
-    if isinstance(value, list):
-        values = [_as_stored(item) for item in value]
-        return None if all(item is None for item in values) else values
-    return _as_stored(value)

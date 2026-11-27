@@ -267,7 +267,7 @@ class Secret(Extension):
 
 def test_write_only_values_are_refused():
     """Writing the tags creates their records again, so a value read back in another form would be written as is."""
-    with pytest.raises(ValueError, match="cannot hold write-only values"):
+    with pytest.raises(ValueError, match="cannot hold values hidden from clients"):
         ResourceMapping(
             User[Secret],
             TaggedUser,
