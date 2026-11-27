@@ -1452,7 +1452,7 @@ testing = [
 
 [[package]]
 name = "scim2-sqlalchemy"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "scim2-models" },
