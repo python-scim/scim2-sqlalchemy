@@ -14,13 +14,14 @@ Prepare the SQLAlchemy model
 
 Give each SQLAlchemy model the columns the storage needs:
 
-- a primary key, mapped to ``id``;
+- a primary key, mapped to ``id``. A :class:`~scim2_sqlalchemy.ResourceMapping` without it
+  raises a :class:`ValueError`;
 - a creation date and a modification date, mapped to ``meta.created`` and
-  ``meta.lastModified``;
+  ``meta.lastModified``. Without them, the resources have no such date;
 - an integer :ref:`version counter <sqlalchemy:mapper_version_counter>`, declared as the
-  ``version_id_col`` of the mapper, and passed as the ``version`` of the mapping.
+  ``version_id_col`` of the mapper, and passed as the ``version`` of the mapping. Without it,
+  ``meta.version`` is a hash of the resource, keyed with the ``version_key`` of the storage.
 
-A :class:`~scim2_sqlalchemy.ResourceMapping` without one of them raises a :class:`ValueError`.
 The project model of the intranet has these columns:
 
 .. literalinclude:: ../_examples/intranet/projects.py

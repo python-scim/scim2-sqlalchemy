@@ -167,13 +167,24 @@ def person_mapping(**attributes):
     return ResourceMapping(User, Person, REQUIRED | attributes, version=Person.version)
 
 
-@pytest.mark.parametrize("missing", ["id", "meta.created", "meta.lastModified"])
-def test_a_mapping_needs_the_identifier_and_the_dates(missing):
-    """The storage fills these attributes, so it needs a column for each."""
+def test_a_mapping_needs_the_identifier():
+    """The storage finds each resource by its identifier."""
+    attributes = {key: value for key, value in REQUIRED.items() if key != "id"}
+
+    with pytest.raises(ValueError, match="needs 'id'"):
+        ResourceMapping(User, Person, attributes, version=Person.version)
+
+
+@pytest.mark.parametrize("missing", ["meta.created", "meta.lastModified"])
+def test_a_mapping_without_dates_gives_resources_without_dates(missing):
+    """The storage fills the dates it has a column for, and warns about the date column it leaves empty."""
     attributes = {key: value for key, value in REQUIRED.items() if key != missing}
 
-    with pytest.raises(ValueError, match=missing):
-        ResourceMapping(User, Person, attributes, version=Person.version)
+    with pytest.warns(UserWarning, match="needs a value, but the storage never"):
+        mapping = ResourceMapping(User, Person, attributes, version=Person.version)
+
+    assert (mapping._created is None) == (missing == "meta.created")
+    assert (mapping._last_modified is None) == (missing == "meta.lastModified")
 
 
 def test_an_identifier_that_can_be_missing_is_refused():
@@ -202,13 +213,13 @@ def test_a_hash_holds_a_write_only_attribute_only():
 )
 def test_an_attribute_neither_read_nor_written_is_refused(path, value):
     """The storage would do nothing with it, yet publish it."""
-    with pytest.raises(ValueError, match="neither read nor written"):
+    with pytest.raises(ValueError, match="Clients could neither read nor write"):
         users_mapping({path: value})
 
 
 def test_a_link_that_can_be_removed_needs_a_foreign_key_accepting_null():
     """Removing the manager would write NULL in a column that refuses it."""
-    with pytest.raises(ValueError, match="foreign key of its relationship must"):
+    with pytest.raises(ValueError, match="its relation needs to hold null"):
         desk_mapping(
             User[EnterpriseUser],
             {
@@ -220,7 +231,7 @@ def test_a_link_that_can_be_removed_needs_a_foreign_key_accepting_null():
 
 def test_a_required_link_of_an_optional_extension_can_be_removed():
     """A resource without the extension has no owner, so the foreign key must accept NULL."""
-    with pytest.raises(ValueError, match="foreign key of its relationship must"):
+    with pytest.raises(ValueError, match="its relation needs to hold null"):
         desk_mapping(
             User[Owned],
             {
@@ -273,8 +284,8 @@ def test_a_column_the_mapping_never_writes_warns():
         )
 
     assert [str(warning.message) for warning in caught] == [
-        "The column desks.keeper_id needs a value, but the mapping of "
-        "User[Owned] never writes it: map it, or give it a default"
+        "The field 'desks.keeper_id' needs a value, but the storage never writes "
+        "it, so creating a resource fails: map it, or give it a default"
     ]
 
 
@@ -285,7 +296,7 @@ def test_a_column_the_mapping_never_writes_warns():
 )
 def test_a_column_needing_a_value_warns_when_it_is_not_written(user_name):
     """Creating a user would fail in the database."""
-    with pytest.warns(UserWarning, match="users.user_name needs a value"):
+    with pytest.warns(UserWarning, match="'users.user_name' needs a value"):
         users_mapping({"userName": user_name})
 
 
@@ -415,8 +426,8 @@ def test_a_column_property_writes_no_column():
         leader_mapping(Leader.first_text)
 
     assert [str(warning.message).split(" needs")[0] for warning in caught] == [
-        "The column members.first",
-        "The column members.last",
+        "The field 'members.first'",
+        "The field 'members.last'",
     ]
 
 
@@ -465,7 +476,7 @@ class Secrets(Extension):
 )
 def test_entries_the_schema_makes_write_only_are_refused(path, attributes):
     """A client never reads them back, so a write would lose them."""
-    with pytest.raises(ValueError, match="cannot hold write-only values"):
+    with pytest.raises(ValueError, match="cannot hold values hidden from clients"):
         ResourceMapping(
             User[Secrets],
             UserRecord,
@@ -549,7 +560,7 @@ def test_the_entries_of_a_many_cannot_hold_write_only_values():
     emails = Many(
         UserRecord.emails, {"value": EmailRecord.value, "type": EmailRecord.type}
     )
-    with pytest.raises(ValueError, match="cannot hold write-only values"):
+    with pytest.raises(ValueError, match="cannot hold values hidden from clients"):
         ResourceMapping(
             SecretUser,
             UserRecord,
@@ -570,7 +581,9 @@ def test_the_entries_of_a_many_are_all_written_or_all_read_only():
         "value": EmailRecord.value,
         "display": Attribute(EmailRecord.value, writable=False),
     }
-    with pytest.raises(ValueError, match="all written or all read-only"):
+    with pytest.raises(
+        ValueError, match="cannot hold a read-only value next to written ones"
+    ):
         users_mapping({"emails": Many(UserRecord.emails, emails)})
 
 
@@ -627,7 +640,7 @@ def test_many_needs_the_delete_orphan_cascade():
 
 def test_an_attribute_is_mapped_to_a_column():
     """A plain value cannot be read from a record."""
-    with pytest.raises(ValueError, match="column or a hybrid property"):
+    with pytest.raises(ValueError, match="cannot be mapped to"):
         person_mapping(userName="user_name")
 
 
@@ -819,7 +832,7 @@ def test_an_attribute_never_returned_is_concealed():
 
     (token,) = hidden.attributes
     assert (token.mutability, token.returned, token.required) == (
-        Mutability.write_only,
+        Mutability.read_write,
         Returned.never,
         Required.false,
     )
@@ -877,9 +890,13 @@ def test_an_immutable_attribute_never_returned_is_published_optional(path):
     (_, hidden) = hidden_mapping(path, UserRecord.user_name).schemas()
 
     (attribute,) = hidden.attributes
-    for published in (attribute, *(attribute.sub_attributes or [])):
-        assert (published.mutability, published.returned, published.required) == (
-            Mutability.immutable,
+    assert (attribute.mutability, attribute.returned, attribute.required) == (
+        Mutability.immutable,
+        Returned.never,
+        Required.false,
+    )
+    for published in attribute.sub_attributes or []:
+        assert (published.returned, published.required) == (
             Returned.never,
             Required.false,
         )
@@ -907,19 +924,18 @@ def test_a_value_clients_never_read_makes_no_complex_attribute_required():
     assert mapping._column(f"{HIDDEN}:plate.serial").concealed
 
 
-def test_a_write_only_value_of_an_immutable_attribute_can_change():
+def test_a_write_only_value_of_an_immutable_attribute_can_be_hashed():
     """The schema makes the secret write-only, which wins over the immutable certificate."""
-    column = hidden_mapping("cert.secret", UserRecord.title)._column(
+    column = hidden_mapping("cert.secret", UserRecord.pin_hash)._column(
         f"{HIDDEN}:cert.secret"
     )
 
     assert column.concealed
-    assert not column.immutable
 
 
 def test_an_attribute_clients_never_read_nor_the_storage_writes_is_refused():
     """A client could neither read the serial back nor change it."""
-    with pytest.raises(ValueError, match="neither read nor written"):
+    with pytest.raises(ValueError, match="Clients could neither read nor write"):
         hidden_mapping("serial", Attribute(UserRecord.title, writable=False))
 
 
@@ -978,7 +994,7 @@ def test_a_computed_column_is_published_read_only():
 
 def test_a_computed_column_cannot_hold_a_value_clients_never_read():
     """A client could neither read the password back nor set it."""
-    with pytest.raises(ValueError, match="neither read nor written"):
+    with pytest.raises(ValueError, match="Clients could neither read nor write"):
         person_mapping(password=Person.shout)
 
 

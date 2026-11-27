@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 from scim2_models import ConflictException
-from scim2_models import InvalidValueException
 from scim2_models import NotFoundException
 from scim2_models import Path
 from scim2_models import PreconditionFailedException
@@ -27,27 +26,29 @@ from scim2_server.keyset import Bound
 from scim2_server.keyset import Position
 from scim2_server.keyset import keyset_page
 from scim2_server.keyset import page_rows
+from scim2_server.mapping import Collection
+from scim2_server.mapping.conversion import assign_links
+from scim2_server.mapping.conversion import check_storable
+from scim2_server.mapping.conversion import comparable
+from scim2_server.mapping.conversion import dates
+from scim2_server.mapping.conversion import link_entries
 from scim2_server.storage import AsyncScimStorage
 from scim2_server.storage import ScimStorage
 from scim2_server.storage import SearchPage
 from sqlalchemy import Dialect
 from sqlalchemy import Select
+from sqlalchemy import inspect
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from .comparison import _Comparator
 from .comparison import _comparator
-from .conversion import _check_storable
-from .conversion import _comparable
 from .conversion import _from_scim
-from .conversion import _link_entries
 from .conversion import _to_scim
-from .conversion import _version
 from .mapping import ResourceMapping
-from .mapping import _Collection
+from .mapping import _as_key
 from .mapping import _Column
-from .query import _as_key
 from .query import _links_statement
 from .query import _load_statement
 from .query import _records_statement
@@ -78,12 +79,6 @@ def _expire(
     record = session.identity_map.get(session.identity_key(mapping.record, key))
     if record is not None:
         session.expire(record)
-
-
-def _holds_id(collection: _Collection, record: Any, value: str) -> bool:
-    """Tell whether a record a Link links to has an identifier."""
-    target_id = collection.target._id  # type: ignore[union-attr]
-    return bool(getattr(record, target_id.key) == _as_key(target_id, value))
 
 
 def _has_text_id(id_column: _Column, record: Any, value: str | None) -> bool:
@@ -191,9 +186,11 @@ class _StorageBase:
         self,
         mappings: Mapping[str, ResourceMapping],
         provider: ScimProvider | None,
+        version_key: bytes | None,
     ) -> None:
         self.mappings = dict(mappings)
         self.provider = provider
+        self.version_key = version_key
         self._policy = provider.policy if provider else ScimPolicy()
         self._comparators: dict[str, _Comparator] = {}
         self._endpoints = {
@@ -204,6 +201,12 @@ class _StorageBase:
             if resource_type.name not in self.mappings:
                 raise ValueError(
                     f"No mapping for the resource type {resource_type.name!r}"
+                )
+        for name, mapping in self.mappings.items():
+            if mapping.version is None and not version_key:
+                raise ValueError(
+                    f"The mapping of {name!r} has no version, so the storage "
+                    "needs a version_key to hash the resources"
                 )
         links = [mapping._targets(self.mappings) for mapping in self.mappings.values()]
         for mapping, targets in zip(self.mappings.values(), links, strict=True):
@@ -301,6 +304,7 @@ class _StorageBase:
             model,
             self._endpoints,
             collections,
+            self.version_key,
         )
 
     def _check_storable(
@@ -310,7 +314,7 @@ class _StorageBase:
         stored: Resource[Any] | None,
     ) -> None:
         """Refuse a change the mapping cannot store. stored is the stored resource, None for a new one."""
-        _check_storable(self._mapping(resource_type), resource, stored)
+        check_storable(self._mapping(resource_type), resource, stored)
 
     @staticmethod
     def _not_found(
@@ -321,15 +325,28 @@ class _StorageBase:
             detail=f"{resource_type.name} {resource_id!r} not found"
         )
 
-    @staticmethod
     def _check_version(
-        mapping: ResourceMapping, record: Any, expected_version: str | None
+        self,
+        resource_type: ResourceType,
+        record: Any,
+        expected_version: str | None,
+        stored: Resource[Any] | None = None,
     ) -> None:
-        """Refuse to change a record whose version is not the expected one."""
-        if (
-            expected_version is not None
-            and _version(mapping, record) != expected_version
-        ):
+        """Refuse to change a record whose version is not the expected one.
+
+        A version counter is read from the record. A hash is the one of the
+        stored resource, built from the record when not given, all of its
+        collections loaded.
+        """
+        if expected_version is None:
+            return
+        mapping = self._mapping(resource_type)
+        if mapping.version is not None:
+            version = f'W/"{mapping._counter(record)}"'
+        else:
+            stored = stored or self._to_scim(resource_type, record)
+            version = stored.meta.version  # type: ignore[union-attr,assignment]
+        if version != expected_version:
             raise PreconditionFailedException
 
     def _comparator(self, dialect: Dialect) -> _Comparator:
@@ -357,68 +374,14 @@ class _StorageBase:
         """
         resource_id = None if stored is None else resource.id
         for column in mapping._unique_columns():
-            if not column.writable:
-                continue
             path = Path(column.binding.urn)
             value = path.get(resource, strict=False)
             if value is None or (
                 stored is not None
-                and _comparable(value) == _comparable(path.get(stored, strict=False))
+                and comparable(value) == comparable(path.get(stored, strict=False))
             ):
                 continue
             yield _taken_statement(mapping, column, value, resource_id, comparator)
-
-    def _assign_links(
-        self, found: list[tuple[_Collection, list[Any]]], entries: list[Any]
-    ) -> dict[_Collection, list[Any]]:
-        """Give each entry of an attribute the record it links to, in the collection of the first Link holding that record.
-
-        found holds the records each Link of the attribute holds among the
-        values of the entries. An entry with a type links to a Link giving
-        the same type.
-        """
-        links: dict[_Collection, list[Any]] = {
-            collection: [] for collection, _ in found
-        }
-        urn = found[0][0].binding.urn
-        for entry in entries:
-            matches = [
-                (collection, record)
-                for collection, records in found
-                for record in records
-                if _holds_id(collection, record, entry.value)
-            ]
-            if not matches:
-                raise InvalidValueException(
-                    detail=f"'{urn}' links to an unknown resource"
-                )
-            entry_type = getattr(entry, "type", None)
-            if entry_type is not None:
-                matches = [
-                    (collection, record)
-                    for collection, record in matches
-                    if self._same_type(collection, entry_type)
-                ]
-                if not matches:
-                    raise InvalidValueException(
-                        detail=f"'{urn}' links to {entry.value!r}, which is not "
-                        f"of type {entry_type!r}"
-                    )
-            collection, record = matches[0]
-            if record not in links[collection]:
-                links[collection].append(record)
-        return links
-
-    def _same_type(self, collection: _Collection, value: str) -> bool:
-        """Tell whether a type is the one a Link gives, compared as filters compare it."""
-        binding = collection.type_column.binding  # type: ignore[union-attr]
-        try:
-            return bool(
-                binding.comparable(value, self._policy)
-                == binding.comparable(collection.link_type, self._policy)
-            )
-        except ValueError:
-            return False
 
     def _new_record(self, resource_type: ResourceType, resource: Resource[Any]) -> Any:
         """Build an empty record for a new resource, with its dates.
@@ -428,9 +391,8 @@ class _StorageBase:
         """
         mapping = self._mapping(resource_type)
         record = mapping.record()
-        now = _utcnow()
-        setattr(record, mapping._created.key, now)
-        setattr(record, mapping._last_modified.key, now)
+        for column, now in dates(mapping, _utcnow(), creating=True):
+            setattr(record, column.key, now)
         return record
 
     def _write_record(
@@ -438,15 +400,21 @@ class _StorageBase:
         mapping: ResourceMapping,
         resource: Resource[Any],
         record: Any,
-        links: dict[_Collection, list[Any]],
+        links: dict[Collection, list[Any]],
     ) -> None:
         """Write a resource in its record, and date the write.
 
-        The date changes the row even when only links change, such as the
-        members of a group, so that the version changes too.
+        The date updates the record even when only links change, such as the
+        members of a group, so that its version counter changes too. Without
+        date, the storage counts the write in the version itself.
         """
         _from_scim(mapping, resource, record, links, creating=False)
-        setattr(record, mapping._last_modified.key, _utcnow())
+        for column, now in dates(mapping, _utcnow(), creating=False):
+            setattr(record, column.key, now)
+        if mapping.version is not None and mapping._last_modified is None:
+            version = mapping.version.key
+            generate = inspect(mapping.record).version_id_generator
+            setattr(record, version, generate(getattr(record, version)))
 
 
 class SqlAlchemyStorage(_StorageBase, ScimStorage):
@@ -471,7 +439,14 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         endpoints of its resource types. Strings are compared with the
         :attr:`~scim2_models.ScimPolicy.comparison_key` of its policy.
         Each of its resource types needs a mapping.
-    :raises ValueError: When a resource type has no mapping.
+    :param version_key: The key of the hash giving the version of the
+        resources whose mapping has no version. Keep it secret, as the hash
+        covers the values clients never read, such as a password hash. The
+        hash covers the links too, so renaming a member changes the version
+        of its groups. A write on such a resource locks its row until the end
+        of the transaction.
+    :raises ValueError: When a resource type has no mapping, or when a
+        mapping has no version and no key is given.
     """
 
     supports_cursors = True
@@ -481,8 +456,10 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         mappings: Mapping[str, ResourceMapping],
         session: Callable[[], Session],
         provider: ScimProvider | None = None,
+        *,
+        version_key: bytes | None = None,
     ) -> None:
-        super().__init__(mappings, provider)
+        super().__init__(mappings, provider, version_key)
         self.session = session
 
     @contextmanager
@@ -569,9 +546,9 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
     ) -> Resource[Any]:
         """Replace a resource, and return it as stored."""
         mapping = self._mapping(resource_type)
-        record = self._load(resource_type, resource.id)
-        self._check_version(mapping, record, expected_version)
+        record = self._load(resource_type, resource.id, locked=True)
         stored = self._to_scim(resource_type, record)
+        self._check_version(resource_type, record, expected_version, stored)
         self._check_storable(resource_type, resource, stored)
         self._check_uniqueness(mapping, resource, stored)
         links = self._links(mapping, resource)
@@ -586,9 +563,8 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         expected_version: str | None = None,
     ) -> None:
         """Delete a resource."""
-        mapping = self._mapping(resource_type)
-        record = self._load(resource_type, resource_id)
-        self._check_version(mapping, record, expected_version)
+        record = self._load(resource_type, resource_id, locked=True)
+        self._check_version(resource_type, record, expected_version)
         self._flush(lambda: self.session().delete(record))
 
     def _load(
@@ -596,10 +572,18 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         resource_type: ResourceType,
         resource_id: str | None,
         parameters: ResponseParameters[Any] | None = None,
+        locked: bool = False,
     ) -> Any:
-        """Load a record, with the collections the response keeps."""
+        """Load a record, with the collections the response keeps.
+
+        A record locked for a write whose version is a hash stays locked until
+        the end of the transaction, so that two writes cannot both pass the
+        check of the same version.
+        """
         mapping = self._mapping(resource_type)
-        statement = _load_statement(mapping, resource_id, parameters)
+        statement = _load_statement(
+            mapping, resource_id, parameters, locked and mapping.version is None
+        )
         _expire(self.session(), mapping, resource_id)
         record = None if statement is None else self.session().scalar(statement)
         if record is None or not _has_text_id(mapping._id, record, resource_id):
@@ -628,10 +612,10 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
 
     def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
-    ) -> dict[_Collection, list[Any]]:
+    ) -> dict[Collection, list[Any]]:
         """Return the records each Link of a resource links to, refusing a value that links to nothing."""
-        links: dict[_Collection, list[Any]] = {}
-        for collections, entries in _link_entries(mapping, resource):
+        links: dict[Collection, list[Any]] = {}
+        for collections, entries in link_entries(mapping, resource):
             ids = [entry.value for entry in entries]
             found = [
                 (
@@ -642,7 +626,7 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
                 )
                 for collection in collections
             ]
-            links |= self._assign_links(found, entries)
+            links |= assign_links(found, entries, self._policy)
         return links
 
     def _flush(self, change: Callable[[], None]) -> None:
@@ -682,7 +666,14 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         Strings are compared with the
         :attr:`~scim2_models.ScimPolicy.comparison_key` of its policy.
         Each of its resource types needs a mapping.
-    :raises ValueError: When a resource type has no mapping.
+    :param version_key: The key of the hash giving the version of the
+        resources whose mapping has no version. Keep it secret, as the hash
+        covers the values clients never read, such as a password hash. The
+        hash covers the links too, so renaming a member changes the version
+        of its groups. A write on such a resource locks its row until the end
+        of the transaction.
+    :raises ValueError: When a resource type has no mapping, or when a
+        mapping has no version and no key is given.
     """
 
     supports_cursors = True
@@ -692,8 +683,10 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         mappings: Mapping[str, ResourceMapping],
         session: Callable[[], "AsyncSession"],
         provider: ScimProvider | None = None,
+        *,
+        version_key: bytes | None = None,
     ) -> None:
-        super().__init__(mappings, provider)
+        super().__init__(mappings, provider, version_key)
         self.session = session
 
     @asynccontextmanager
@@ -777,9 +770,9 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
     ) -> Resource[Any]:
         """Replace a resource, and return it as stored."""
         mapping = self._mapping(resource_type)
-        record = await self._load(resource_type, resource.id)
-        self._check_version(mapping, record, expected_version)
+        record = await self._load(resource_type, resource.id, locked=True)
         stored = self._to_scim(resource_type, record)
+        self._check_version(resource_type, record, expected_version, stored)
         self._check_storable(resource_type, resource, stored)
         await self._check_uniqueness(mapping, resource, stored)
         links = await self._links(mapping, resource)
@@ -798,9 +791,8 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         expected_version: str | None = None,
     ) -> None:
         """Delete a resource."""
-        mapping = self._mapping(resource_type)
-        record = await self._load(resource_type, resource_id)
-        self._check_version(mapping, record, expected_version)
+        record = await self._load(resource_type, resource_id, locked=True)
+        self._check_version(resource_type, record, expected_version)
 
         async def change() -> None:
             await self.session().delete(record)
@@ -812,10 +804,18 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         resource_type: ResourceType,
         resource_id: str | None,
         parameters: ResponseParameters[Any] | None = None,
+        locked: bool = False,
     ) -> Any:
-        """Load a record, with the collections the response keeps."""
+        """Load a record, with the collections the response keeps.
+
+        A record locked for a write whose version is a hash stays locked until
+        the end of the transaction, so that two writes cannot both pass the
+        check of the same version.
+        """
         mapping = self._mapping(resource_type)
-        statement = _load_statement(mapping, resource_id, parameters)
+        statement = _load_statement(
+            mapping, resource_id, parameters, locked and mapping.version is None
+        )
         _expire(self.session(), mapping, resource_id)
         record = None if statement is None else await self.session().scalar(statement)
         if record is None or not _has_text_id(mapping._id, record, resource_id):
@@ -845,17 +845,17 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
 
     async def _links(
         self, mapping: ResourceMapping, resource: Resource[Any]
-    ) -> dict[_Collection, list[Any]]:
+    ) -> dict[Collection, list[Any]]:
         """Return the records each Link of a resource links to, refusing a value that links to nothing."""
-        links: dict[_Collection, list[Any]] = {}
-        for collections, entries in _link_entries(mapping, resource):
+        links: dict[Collection, list[Any]] = {}
+        for collections, entries in link_entries(mapping, resource):
             ids = [entry.value for entry in entries]
             found = []
             for collection in collections:
                 statement = _links_statement(collection, ids)
                 records = (await self.session().scalars(statement)).all()
                 found.append((collection, list(records)))
-            links |= self._assign_links(found, entries)
+            links |= assign_links(found, entries, self._policy)
         return links
 
     async def _flush(self, change: Callable[[], Awaitable[None]]) -> None:

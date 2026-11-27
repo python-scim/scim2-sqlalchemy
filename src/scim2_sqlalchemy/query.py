@@ -1,27 +1,23 @@
 import decimal
 import operator
 from collections.abc import Callable
+from collections.abc import Iterable
 from typing import Any
 from typing import TypeVarTuple
+from typing import cast as cast_type
 
-from scim2_models import AttributeBinding
 from scim2_models import InvalidCursorException
-from scim2_models import InvalidFilterException
 from scim2_models import InvalidPathException
 from scim2_models import ResponseParameters
-from scim2_models import ScimFilter
 from scim2_models import SearchRequest
-from scim2_models.path import AttrPath
 from scim2_models.path import CompareOperator
-from scim2_models.path import Comparison
-from scim2_models.path import FilterVisitor
-from scim2_models.path import LogicalExpr
-from scim2_models.path import LogicalOperator
-from scim2_models.path import Not
-from scim2_models.path import Present
-from scim2_models.path import ValuePath
-from scim2_models.path import coerce_value
 from scim2_server.keyset import Position
+from scim2_server.mapping import Collection
+from scim2_server.mapping import Column
+from scim2_server.mapping.filters import compare
+from scim2_server.mapping.filters import entry_present
+from scim2_server.mapping.filters import sort_target
+from scim2_server.mapping.filters import where
 from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
 from sqlalchemy import Double
@@ -30,6 +26,7 @@ from sqlalchemy import Numeric
 from sqlalchemy import Select
 from sqlalchemy import and_
 from sqlalchemy import bindparam
+from sqlalchemy import case
 from sqlalchemy import cast
 from sqlalchemy import false
 from sqlalchemy import func
@@ -56,6 +53,7 @@ from .keyset import _Sorted
 from .mapping import _INTEGERS
 from .mapping import _MARIADB
 from .mapping import ResourceMapping
+from .mapping import _as_key
 from .mapping import _Collection
 from .mapping import _Column
 from .mapping import _python_type
@@ -103,20 +101,6 @@ def _compile_typed_null_mariadb(
     return "NULL"
 
 
-def _as_key(column: _Column, value: Any) -> Any:
-    """Return an identifier in the type of its column, or None when it cannot have that type."""
-    python_type = _python_type(column.expression)
-    if python_type is None:
-        return value
-    try:
-        key = python_type(value)
-    except (TypeError, ValueError):
-        return None
-    if isinstance(key, int) and key not in _INTEGERS:
-        return None
-    return key
-
-
 def _bound(column: _Column, value: Any) -> Any:
     """Return a value ready to compare with a column.
 
@@ -143,8 +127,6 @@ def _out_of_range(
     expression: ColumnElement[Any], op: CompareOperator, value: int
 ) -> ColumnElement[bool]:
     """Compare an integer column with an integer no database can store."""
-    if op == CompareOperator.ne:
-        return true()
     above = value > 0
     if (op in (CompareOperator.gt, CompareOperator.ge) and not above) or (
         op in (CompareOperator.lt, CompareOperator.le) and above
@@ -165,255 +147,97 @@ def _exact_key(column: _Column, value: str) -> Any:
     return key
 
 
-def _unmapped(binding: AttributeBinding) -> InvalidFilterException:
-    """Return the error of a filter on an attribute the mapping does not let filters read."""
-    return InvalidFilterException(detail=f"Cannot filter on '{binding.urn}'")
+class _Predicates:
+    """The conditions of the mapping core, as SQLAlchemy expressions.
 
-
-class _FilterTranslator(FilterVisitor[ColumnElement[bool]]):
-    """Turn a SCIM filter into a condition on the records of a mapping.
-
-    The condition keeps the records whose resources ScimFilter.match keeps.
     Every condition is true or false, never NULL, so that the negation of a
-    comparison with a missing value holds.
-
-    scope is the collection that a value selection, such as
-    emails[type eq "work"], applies its filter to.
+    comparison with a missing value holds. The conditions on the entries of a
+    collection compare the columns of the entry class, which the relationship
+    correlates with the record.
     """
 
-    def __init__(
-        self,
-        mapping: ResourceMapping,
-        scim_filter: ScimFilter[Any],
-        comparator: _Comparator,
-        scope: tuple[AttrPath, _Collection] | None = None,
-    ) -> None:
-        self.mapping = mapping
-        self.filter = scim_filter
+    def __init__(self, comparator: _Comparator) -> None:
         self.comparator = comparator
-        self.scope = scope
 
-    def _resolve(
-        self,
-        attr_path: AttrPath,
-        resolve: Callable[..., AttributeBinding | None],
-    ) -> AttributeBinding | None:
-        """Bind the attribute path of a comparison or of a presence test.
+    def true(self) -> ColumnElement[bool]:
+        return true()
 
-        Within a value selection of a simple attribute, such as
-        tags[value eq "x"], value is the entry itself, and any other attribute
-        matches nothing, as ScimFilter.match has it.
-        """
-        if self.scope is None:
-            return resolve(attr_path, strict=False)
-        scope_path, scope = self.scope
-        if scope.simple:
-            own = attr_path.attr.lower() == "value" and not attr_path.sub_attr
-            return scope.binding if own else None
-        return resolve(
-            AttrPath(scope_path.attr, attr_path.attr, scope_path.uri), strict=False
-        )
-
-    def _lookup(
-        self, binding: AttributeBinding
-    ) -> list[tuple[_Collection | None, _Column | None]]:
-        """Return the collections holding an attribute, with its column in each, as the mapping does.
-
-        Within a value selection, only the collection of the selection holds
-        the attribute.
-        """
-        pairs = self.mapping._lookup(binding)
-        if self.scope is None:
-            return pairs
-        _, scope = self.scope
-        return [
-            (collection, column) for collection, column in pairs if collection is scope
-        ]
-
-    def _targets(
-        self, binding: AttributeBinding
-    ) -> list[tuple[_Collection | None, _Column]]:
-        """Return the collections holding an attribute with its column in each, refusing an attribute that one of them does not let filters read."""
-        pairs = self._lookup(binding)
-        if any(column is None or column.concealed for _, column in pairs):
-            raise _unmapped(binding)
-        return pairs  # type: ignore[return-value]
-
-    def _in_collection(
-        self, collection: _Collection | None, condition: ColumnElement[bool]
-    ) -> ColumnElement[bool]:
-        """Apply a condition to the entries of a collection, or to the record itself outside of any collection.
-
-        Within a value selection, the condition already applies to the entries.
-        """
-        if collection is None or self.scope is not None:
-            return condition
-        return collection.exists(condition)
-
-    def visit_comparison(self, node: Comparison) -> ColumnElement[bool]:
-        """Keep the records with a value matching the comparison, in any collection holding the attribute."""
-        binding = self._resolve(node.attr_path, self.filter.resolve_comparison)
-        if binding is None:
-            return false()
-        targets = self._targets(binding)
-        value = coerce_value(binding, node.value, node.op)
-
-        # 'emails ne "x"' holds when no email is "x", while
-        # 'emails[value ne "x"]' holds when one email is not "x".
-        if (
-            node.op == CompareOperator.ne
-            and targets[0][0] is not None
-            and self.scope is None
-        ):
-            return not_(
-                or_(
-                    *(
-                        collection.exists(  # type: ignore[union-attr]
-                            _compare(self.comparator, column, CompareOperator.eq, value)
-                        )
-                        for collection, column in targets
-                    )
-                )
-            )
-        return or_(
-            *(
-                self._in_collection(
-                    collection, _compare(self.comparator, column, node.op, value)
-                )
-                for collection, column in targets
-            )
-        )
-
-    def visit_present(self, node: Present) -> ColumnElement[bool]:
-        """Keep the records with a value for the attribute.
-
-        A complex attribute is present when one of its sub-attributes is.
-        """
-        binding = self._resolve(node.attr_path, self.filter.resolve)
-        if binding is None:
-            return false()
-        pairs = self._lookup(binding)
-        in_collection = pairs[0][0] is not None
-        if in_collection and binding.sub_field_name is None and pairs[0][1] is None:
-            return or_(*(collection.exists() for collection, _ in pairs))  # type: ignore[union-attr]
-        if all(column is not None and not column.concealed for _, column in pairs):
-            return or_(
-                *(
-                    self._in_collection(collection, _present(column))  # type: ignore[arg-type]
-                    for collection, column in pairs
-                )
-            )
-
-        sub_columns = [
-            column
-            for column in self.mapping._sub_columns(binding)
-            if not column.concealed
-        ]
-        if in_collection or not sub_columns:
-            raise _unmapped(binding)
-        return or_(*(_present(column) for column in sub_columns))
-
-    def visit_not(self, node: Not) -> ColumnElement[bool]:
-        """Keep the records the inner filter does not keep."""
-        return not_(self.visit(node.expr))
-
-    def visit_logical_expr(self, node: LogicalExpr) -> ColumnElement[bool]:
-        """Combine the conditions of the terms with AND or OR."""
-        combine = and_ if node.op == LogicalOperator.and_ else or_
-        return combine(*(self.visit(term) for term in node.terms))
-
-    def visit_value_path(self, node: ValuePath) -> ColumnElement[bool]:
-        """Keep the records with an entry of the attribute matching the inner filter."""
-        binding = self.filter.resolve(node.attr_path, strict=False)
-        if binding is None:
-            return false()
-        collections = [
-            collection
-            for collection, _ in self.mapping._lookup(binding)
-            if collection is not None
-        ]
-        if not collections:
-            raise _unmapped(binding)
-        return or_(
-            *(
-                collection.exists(
-                    _FilterTranslator(
-                        self.mapping,
-                        self.filter,
-                        self.comparator,
-                        (node.attr_path, collection),
-                    ).visit(node.val_filter)
-                )
-                for collection in collections
-            )
-        )
-
-
-def _present(column: _Column) -> ColumnElement[bool]:
-    """Per RFC 7644 §3.4.2.2, an empty string is no value."""
-    expression = column.compared
-    if column.is_string:
-        return and_(expression.is_not(None), expression != "")
-    return expression.is_not(None)
-
-
-def _compare(
-    comparator: _Comparator, column: _Column, op: CompareOperator, value: Any
-) -> ColumnElement[bool]:
-    """Compare a column with a value, strings in the form the policy compares them under.
-
-    A string the policy cannot prepare is equal to no other value, so only ne
-    holds against it.
-    """
-    expression = column.compared
-    value = _as_stored(value)
-    if value is None:
-        if op == CompareOperator.eq:
-            return expression.is_(None)
-        if op == CompareOperator.ne:
-            return expression.is_not(None)
+    def false(self) -> ColumnElement[bool]:
         return false()
 
-    if column.textual and op in (CompareOperator.eq, CompareOperator.ne):
-        # The identifier is compared in its own type, so that the database
-        # uses its index, and does not depend on how it writes a UUID as text.
-        key = _exact_key(column, value)
-        if key is None:
-            return true() if op == CompareOperator.ne else false()
-        if op == CompareOperator.ne:
-            return or_(
-                column.expression.is_(None), column.expression != _bound(column, key)
-            )
-        return and_(
-            column.expression.is_not(None), column.expression == _bound(column, key)
-        )
+    def any(self, conditions: Iterable[ColumnElement[bool]]) -> ColumnElement[bool]:
+        return or_(false(), *conditions)
 
-    if not column.is_string:
+    def all(self, conditions: Iterable[ColumnElement[bool]]) -> ColumnElement[bool]:
+        return and_(true(), *conditions)
+
+    def negate(self, condition: ColumnElement[bool]) -> ColumnElement[bool]:
+        return not_(condition)
+
+    def is_null(self, column: Column) -> ColumnElement[bool]:
+        return _sa(column).compared.is_(None)
+
+    def is_empty(self, column: Column) -> ColumnElement[bool]:
+        return _sa(column).compared == ""
+
+    def compare(
+        self, column: Column, op: CompareOperator, value: Any
+    ) -> ColumnElement[bool]:
+        """Compare a column that does not hold strings.
+
+        An integer no database stores is above or below every value. A
+        boolean is compared with a column of integers as 0 or 1, since
+        PostgreSQL has no operator between an integer and a boolean.
+        """
+        column = _sa(column)
+        expression = column.compared
+        value = _as_stored(value)
         if isinstance(value, int) and _python_type(column.expression) is int:
             if value not in _INTEGERS:
                 return _out_of_range(expression, op, value)
-            # A boolean is compared with a column of integers as 0 or 1, since
-            # PostgreSQL has no operator between an integer and a boolean.
             value = _bound(column, int(value))
-        if op == CompareOperator.ne:
-            return or_(expression.is_(None), expression != value)
+        return _ORDERINGS[op](expression, value)  # type: ignore[no-any-return]
+
+    def compare_text(
+        self, column: Column, op: CompareOperator, value: str
+    ) -> ColumnElement[bool]:
+        """Compare a string column in the form the policy compares it under.
+
+        A stored value the comparison key refuses is compared as no value, so
+        that the comparison is false rather than NULL.
+        """
+        column = _sa(column)
+        left = self.comparator.column(column)
         if op in _SUBSTRINGS:
-            return false()
-        return and_(expression.is_not(None), _ORDERINGS[op](expression, value))
+            condition = self.comparator.substring(op, column, value)
+        else:
+            condition = _ORDERINGS[op](left, self.comparator.operand(column, value))
+        return and_(left.is_not(None), condition)
 
-    try:
-        column.binding.comparable(value, comparator.policy)
-    except ValueError:
-        return true() if op == CompareOperator.ne else false()
+    def compare_key(self, column: Column, value: Any) -> ColumnElement[bool] | None:
+        """Compare an identifier in its own type.
 
-    left = comparator.column(column)
-    if op == CompareOperator.ne:
-        return or_(left.is_(None), left != comparator.operand(column, value))
-    if op in _SUBSTRINGS:
-        condition = comparator.substring(op, column, value)
-    else:
-        condition = _ORDERINGS[op](left, comparator.operand(column, value))
-    return and_(left.is_not(None), condition)
+        The database then uses its index, and the result does not depend on
+        how the database writes a UUID as text.
+        """
+        column = _sa(column)
+        key = _exact_key(column, value)
+        if key is None:
+            return None
+        return column.expression == _bound(column, key)  # type: ignore[no-any-return]
+
+    def exists(
+        self,
+        collection: Collection,
+        build: Callable[[Any], ColumnElement[bool]] | None = None,
+    ) -> ColumnElement[bool]:
+        condition = None if build is None else build(self)
+        return collection.exists(condition)  # type: ignore[attr-defined,no-any-return]
+
+
+def _sa(column: Column) -> _Column:
+    """Return a column built by the SQLAlchemy mapping."""
+    return column  # type: ignore[return-value]
 
 
 def _sort_key(
@@ -424,27 +248,33 @@ def _sort_key(
     """Return the expression the records of a mapping sort on.
 
     Return None when the search has no sortBy, or when the model of the
-    mapping does not declare its attribute.
+    mapping does not declare its attribute. A constant of an Entry sorts as
+    its value when the entry exists, and as no value otherwise.
     """
-    binding = search_request.sort_binding(mapping.model)
-    if binding is None:
+    target = sort_target(mapping, search_request)
+    if target is None:
         return None
-    collection, column = mapping._lookup(binding)[0]
-    if (
-        column is None
-        or column.concealed
-        or (collection is not None and not collection.owned)
-    ):
-        raise InvalidPathException(
-            path=str(search_request.sort_by),
-            detail=f"Cannot sort on '{binding.urn}'",
-        )
-    expression: Any = column.expression
+    collection, column = target
+    if column.is_constant:
+        return _constant_key(mapping, column, comparator)
+    expression: Any = _sa(column).expression
     if column.is_string:
-        expression = comparator.column(column)
+        expression = comparator.column(_sa(column))
     if collection is not None:
-        expression = _first_entry(collection, expression)
+        expression = _first_entry(collection, expression)  # type: ignore[arg-type]
     return expression
+
+
+def _constant_key(
+    mapping: ResourceMapping, column: Column, comparator: _Comparator
+) -> Any:
+    """Return the sort key of a constant of an Entry: its comparison key when the entry exists, and no value otherwise."""
+    entry = mapping._entry_of(column)
+    present = entry_present(_Predicates(comparator), entry)  # type: ignore[arg-type]
+    constant = column.constant
+    if column.is_string:
+        constant = column.binding.comparable(constant, comparator.policy)
+    return case((present, literal(constant)), else_=null())
 
 
 def _first_entry(collection: _Collection, expression: Any) -> Any:
@@ -454,7 +284,7 @@ def _first_entry(collection: _Collection, expression: Any) -> Any:
     order: list[Any] = []
     primary = collection.columns.get("primary")
     if primary is not None:
-        order.append(_Sorted(primary.expression, ascending=False, last=True))
+        order.append(_Sorted(_sa(primary).expression, ascending=False, last=True))
     order.extend(relationship.order_by or entry_mapper.primary_key)
     return (
         select(expression)
@@ -471,10 +301,10 @@ def _where(
     comparator: _Comparator,
 ) -> ColumnElement[bool]:
     """Return the condition keeping the records matching the filter of a search, or every record without filter."""
-    if search_request.filter is None:
-        return true()
-    scim_filter = ScimFilter[mapping.model](str(search_request.filter))  # type: ignore[name-defined]
-    return _FilterTranslator(mapping, scim_filter, comparator).visit(scim_filter.ast)
+    condition: ColumnElement[bool] = where(
+        mapping, search_request, _Predicates(comparator), comparator.policy
+    )
+    return condition
 
 
 def _cursor_page(
@@ -621,40 +451,50 @@ def _load_statement(
     mapping: ResourceMapping,
     resource_id: str | None,
     parameters: ResponseParameters[Any] | None = None,
+    locked: bool = False,
 ) -> Select[Any] | None:
     """Return the statement loading a record, or None when no record can have this identifier.
 
-    Only the collections the response keeps are loaded, all of them without parameters.
+    Only the collections the response keeps are loaded, all of them without
+    parameters. A locked record stays locked until the end of the
+    transaction, on the databases that lock rows.
     """
     key = _as_key(mapping._id, resource_id)
     if key is None:
         return None
-    return (
+    statement = (
         select(mapping.record)
         .where(mapping._id.expression == _bound(mapping._id, key))
         .options(*mapping._loader_options(mapping._returned_collections(parameters)))
     )
+    return statement.with_for_update() if locked else statement
 
 
 def _taken_statement(
     mapping: ResourceMapping,
-    column: _Column,
+    column: Column,
     value: Any,
     resource_id: str | None,
     comparator: _Comparator,
 ) -> Select[Any]:
     """Return the statement finding another record holding a unique value."""
-    condition = _compare(comparator, column, CompareOperator.eq, value)
+    condition = compare(
+        mapping,
+        _Predicates(comparator),
+        comparator.policy,
+        column,
+        CompareOperator.eq,
+        value,
+    )
     key = None if resource_id is None else _as_key(mapping._id, resource_id)
     if key is not None:
         condition = and_(condition, mapping._id.expression != _bound(mapping._id, key))
     return select(mapping._id.expression).where(condition).limit(1)
 
 
-def _links_statement(collection: _Collection, ids: list[str]) -> Select[Any]:
+def _links_statement(collection: Collection, ids: list[str]) -> Select[Any]:
     """Return the statement loading the records a Link links to."""
-    target = collection.target
-    assert target is not None
+    target = cast_type(ResourceMapping, collection.target)
     keys = [
         key for key in (_as_key(target._id, value) for value in ids) if key is not None
     ]

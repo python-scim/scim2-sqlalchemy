@@ -822,7 +822,7 @@ def test_a_column_the_database_numbers_needs_no_value(
 
 def test_another_integrity_error_goes_through(storage_factory, user_type):
     """An integrity error unrelated to unique values is not a 409."""
-    with pytest.warns(UserWarning, match="users.user_name needs a value"):
+    with pytest.warns(UserWarning, match="'users.user_name' needs a value"):
         users = users_mapping({"userName": None})
     storage = storage_factory({"User": users, "Group": groups_mapping()})
 
@@ -1108,7 +1108,7 @@ def test_an_identifier_is_found_by_its_exact_text(
         )
     )
     session.flush()
-    with pytest.warns(UserWarning, match="users.user_name needs a value"):
+    with pytest.warns(UserWarning, match="'users.user_name' needs a value"):
         mapping = users_mapping(
             {"id": UserRecord.user_name, "userName": UserRecord.display_name}
         )
