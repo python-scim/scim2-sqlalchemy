@@ -471,6 +471,17 @@ def _load_statement(
     return statement.with_for_update() if locked else statement
 
 
+def _id_taken_statement(
+    mapping: ResourceMapping, resource_id: str
+) -> Select[Any] | None:
+    """Return the statement finding a record of a mapping with an identifier, or None when no record can have it."""
+    key = _as_key(mapping._id, resource_id)
+    if key is None:
+        return None
+    condition = mapping._id.expression == _bound(mapping._id, key)
+    return select(mapping._id.expression).where(condition).limit(1)
+
+
 def _taken_statement(
     mapping: ResourceMapping,
     binding: AttributeBinding,
