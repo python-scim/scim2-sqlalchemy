@@ -1,6 +1,31 @@
 Changelog
 =========
 
+[Unreleased]
+------------
+
+Added
+^^^^^
+- The storage checks the uniqueness of sub-attributes, such as ``emails.value``. Each value
+  of a multi-valued attribute counts on its own.
+- Override :meth:`~scim2_sqlalchemy.SqlAlchemyStorage.generate_id` to choose the identifier of
+  a new resource. The asynchronous storage awaits it, so the identifier can come from another
+  service.
+
+Changed
+^^^^^^^
+- scim2-server 0.10.0 or later is required.
+- A mapping, and :func:`~scim2_sqlalchemy.generate_mappings`, refuse a unique attribute that
+  clients never read back, with a :class:`ValueError`. A 409 would tell that another resource
+  holds the value.
+
+Fixed
+^^^^^
+- Per :rfc:`7643` erratum 8279, a unique value is checked against every resource type whose
+  schema holds the attribute, not only the resource type being written.
+- An update that keeps or swaps the values of a :class:`~scim2_sqlalchemy.Many` no longer gets
+  a 409 from a unique index that the application adds to its table.
+
 [0.4.0] - 2026-11-27
 --------------------
 

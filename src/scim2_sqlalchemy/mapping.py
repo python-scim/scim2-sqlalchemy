@@ -488,6 +488,29 @@ class ResourceMapping(core.ResourceMapping):
             for collection in collections
         ]
 
+    def _new_key(self, resource_id: str) -> Any:
+        """Return the identifier a new record gets, in the type of its column.
+
+        Raise a ValueError when the storage cannot write the identifier, or when
+        its column cannot hold it.
+        """
+        (value,) = [
+            value
+            for binding, value in self._declared.values()
+            if key(binding) == key(self._id.binding)
+        ]
+        if not self._value_writable(value):
+            raise ValueError(
+                f"The storage cannot write the 'id' of {self.model.__name__}"
+            )
+
+        record_key = _as_key(self._id, resource_id)
+        if record_key is None:
+            raise ValueError(
+                f"The 'id' of {self.model.__name__} cannot be {resource_id!r}"
+            )
+        return record_key
+
     def _is_target(self, value: Any) -> bool:
         return isinstance(getattr(value, "key", None), str) and hasattr(value, "class_")
 

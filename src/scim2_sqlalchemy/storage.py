@@ -13,7 +13,6 @@ from typing import Any
 
 from scim2_models import ConflictException
 from scim2_models import NotFoundException
-from scim2_models import Path
 from scim2_models import PreconditionFailedException
 from scim2_models import Resource
 from scim2_models import ResourceType
@@ -29,12 +28,12 @@ from scim2_server.keyset import page_rows
 from scim2_server.mapping import Collection
 from scim2_server.mapping.conversion import assign_links
 from scim2_server.mapping.conversion import check_storable
-from scim2_server.mapping.conversion import comparable
 from scim2_server.mapping.conversion import dates
 from scim2_server.mapping.conversion import link_entries
 from scim2_server.storage import AsyncScimStorage
 from scim2_server.storage import ScimStorage
 from scim2_server.storage import SearchPage
+from scim2_server.storage import unique_values
 from sqlalchemy import Dialect
 from sqlalchemy import Select
 from sqlalchemy import inspect
@@ -49,6 +48,7 @@ from .conversion import _to_scim
 from .mapping import ResourceMapping
 from .mapping import _as_key
 from .mapping import _Column
+from .query import _id_taken_statement
 from .query import _links_statement
 from .query import _load_statement
 from .query import _records_statement
@@ -357,40 +357,74 @@ class _StorageBase:
             )
         return self._comparators[dialect.name]
 
-    @staticmethod
     def _unique_statements(
-        mapping: ResourceMapping,
+        self,
         resource: Resource[Any],
         comparator: _Comparator,
         stored: Resource[Any] | None,
+        record: Any,
     ) -> Iterator[Select[Any]]:
         """Yield the statements finding another record holding a unique value of the resource.
 
-        A missing value never clashes, as a SQL NULL does not, and a value the
-        storage never writes, such as ``id``, is not stored. stored is the
-        resource an update changes, and None for a new one. A value it already
-        holds is not checked: another application may have stored a value that
-        clashes with it, and the record must remain writable.
+        Per RFC 7643 erratum 8279, a value is looked for in every mapping
+        storing its attribute, whatever their resource type. stored and record
+        are the resource an update changes and its record, and None for a new
+        one. A value the stored resource already holds is not checked: another
+        application may have stored a value that clashes with it, and the
+        record must remain writable.
         """
-        resource_id = None if stored is None else resource.id
-        for column in mapping._unique_columns():
-            path = Path(column.binding.urn)
-            value = path.get(resource, strict=False)
-            if value is None or (
-                stored is not None
-                and comparable(value) == comparable(path.get(stored, strict=False))
-            ):
+        held = {} if stored is None else unique_values(stored, self._policy)
+        for urn, pairs in unique_values(resource, self._policy).items():
+            kept = [comparable for _, comparable in held.get(urn, [])]
+            values = [
+                value
+                for value, comparable in pairs
+                if comparable is not None and comparable not in kept
+            ]
+            if not values:
                 continue
-            yield _taken_statement(mapping, column, value, resource_id, comparator)
+            for mapping in self.mappings.values():
+                binding = mapping._unique_attributes().get(urn)
+                if binding is not None:
+                    yield _taken_statement(mapping, binding, values, comparator, record)
 
-    def _new_record(self, resource_type: ResourceType, resource: Resource[Any]) -> Any:
-        """Build an empty record for a new resource, with its dates.
+    def _id_statements(self, resource_id: str) -> Iterator[Select[Any]]:
+        """Yield the statements finding a record of any mapping with an identifier.
+
+        Per RFC 7643 §3.1, an identifier is unique across the resources of
+        every resource type.
+        """
+        for mapping in self.mappings.values():
+            statement = _id_taken_statement(mapping, resource_id)
+            if statement is not None:
+                yield statement
+
+    @staticmethod
+    def _clear_entries(mapping: ResourceMapping, record: Any) -> bool:
+        """Remove the entries a record owns before an update, and tell whether it had any.
+
+        The session inserts the new entries before it deletes the old ones.
+        Flushing the removal first lets a unique index of the entries accept a
+        value the resource keeps.
+        """
+        cleared = False
+        for collection in mapping._all_collections():
+            key = collection.relation.key
+            if collection.owned and collection.writable and getattr(record, key):
+                setattr(record, key, [])
+                cleared = True
+        return cleared
+
+    def _new_record(self, resource_type: ResourceType, resource_id: str | None) -> Any:
+        """Build an empty record for a new resource, with its identifier when it is given, and its dates.
 
         The resource is written once the record is in the session, so that the
         records it links to do not pull a record the session does not know.
         """
         mapping = self._mapping(resource_type)
         record = mapping.record()
+        if resource_id is not None:
+            setattr(record, mapping._id.key, mapping._new_key(resource_id))
         for column, now in dates(mapping, _utcnow(), creating=True):
             setattr(record, column.key, now)
         return record
@@ -473,6 +507,44 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         with self.session().begin_nested():
             yield
 
+    def generate_id(
+        self, resource_type: ResourceType, resource: Resource[Any]
+    ) -> str | None:
+        """Return the identifier of a new resource, or :data:`None` to let its column give one.
+
+        Override this method to choose the identifiers, as
+        :meth:`InMemoryStorage.generate_id <scim2_server.memory.InMemoryStorage.generate_id>`
+        allows. The following storage derives the identifier of a user from
+        its userName at creation, so that two servers give the same user the
+        same identifier:
+
+        >>> import uuid
+        >>> USERS = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+        >>> class Storage(SqlAlchemyStorage):
+        ...     def generate_id(self, resource_type, resource):
+        ...         if resource_type.name != "User":
+        ...             return None
+        ...         return str(uuid.uuid5(USERS, resource.user_name))
+
+        The storage calls it once for each new resource, after checking the
+        resource, and does not call it for a resource it refuses. Per
+        :rfc:`7643#section-3.1`, an identifier is unique across all the resource
+        types: an identifier that another resource holds raises a 409.
+
+        The storage stores the identifier in the type of its column, and the
+        created resource has the identifier as the column gives it back. For
+        example, ``007`` in an integer column becomes ``7``. The storage raises
+        a :class:`ValueError` when the column cannot hold the identifier, or
+        when it cannot write it, such as an ``id`` mapped to a property without
+        setter.
+
+        When the database numbers the records, as an autoincrement column
+        does, give an identifier to all the resources of a type, or to none.
+        The database does not skip the numbers given by this method, so a
+        resource that it numbers later can get one of them, and a 409.
+        """
+        return None
+
     def get(
         self,
         resource_type: ResourceType,
@@ -526,9 +598,12 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         """Store a new resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         self._check_storable(resource_type, resource, None)
-        self._check_uniqueness(mapping, resource, None)
+        self._check_uniqueness(resource, None, None)
         links = self._links(mapping, resource)
-        record = self._new_record(resource_type, resource)
+        resource_id = self.generate_id(resource_type, resource)
+        if resource_id is not None:
+            self._check_id(resource_id)
+        record = self._new_record(resource_type, resource_id)
 
         def change() -> None:
             self.session().add(record)
@@ -550,9 +625,15 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         stored = self._to_scim(resource_type, record)
         self._check_version(resource_type, record, expected_version, stored)
         self._check_storable(resource_type, resource, stored)
-        self._check_uniqueness(mapping, resource, stored)
+        self._check_uniqueness(resource, stored, record)
         links = self._links(mapping, resource)
-        self._flush(lambda: self._write_record(mapping, resource, record, links))
+
+        def change() -> None:
+            if self._clear_entries(mapping, record):
+                self.session().flush()
+            self._write_record(mapping, resource, record, links)
+
+        self._flush(change)
         return self.get(resource_type, resource.id)  # type: ignore[arg-type]
 
     def delete(
@@ -591,16 +672,20 @@ class SqlAlchemyStorage(_StorageBase, ScimStorage):
         return record
 
     def _check_uniqueness(
-        self,
-        mapping: ResourceMapping,
-        resource: Resource[Any],
-        stored: Resource[Any] | None,
+        self, resource: Resource[Any], stored: Resource[Any] | None, record: Any
     ) -> None:
         """Refuse a resource with a unique value another resource already has."""
         session = self.session()
         comparator = self._ready_comparator(session)
-        for statement in self._unique_statements(mapping, resource, comparator, stored):
+        statements = self._unique_statements(resource, comparator, stored, record)
+        for statement in statements:
             if session.scalar(statement) is not None:
+                raise UniquenessException
+
+    def _check_id(self, resource_id: str) -> None:
+        """Refuse an identifier another resource already has."""
+        for statement in self._id_statements(resource_id):
+            if self.session().scalar(statement) is not None:
                 raise UniquenessException
 
     def _ready_comparator(self, session: Session) -> _Comparator:
@@ -695,6 +780,19 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         async with self.session().begin_nested():
             yield
 
+    async def generate_id(
+        self, resource_type: ResourceType, resource: Resource[Any]
+    ) -> str | None:
+        """Return the identifier of a new resource, or :data:`None` to let its column give one.
+
+        See :meth:`SqlAlchemyStorage.generate_id`. This method can await, for
+        instance to create the account in another service and take its
+        identifier. A write that fails afterwards, such as with a 409 from the
+        database, does not undo what the method did: override
+        :meth:`create` to handle it.
+        """
+        return None
+
     async def get(
         self,
         resource_type: ResourceType,
@@ -750,9 +848,12 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         """Store a new resource, and return it as stored."""
         mapping = self._mapping(resource_type)
         self._check_storable(resource_type, resource, None)
-        await self._check_uniqueness(mapping, resource, None)
+        await self._check_uniqueness(resource, None, None)
         links = await self._links(mapping, resource)
-        record = self._new_record(resource_type, resource)
+        resource_id = await self.generate_id(resource_type, resource)
+        if resource_id is not None:
+            await self._check_id(resource_id)
+        record = self._new_record(resource_type, resource_id)
 
         async def change() -> None:
             self.session().add(record)
@@ -774,10 +875,12 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         stored = self._to_scim(resource_type, record)
         self._check_version(resource_type, record, expected_version, stored)
         self._check_storable(resource_type, resource, stored)
-        await self._check_uniqueness(mapping, resource, stored)
+        await self._check_uniqueness(resource, stored, record)
         links = await self._links(mapping, resource)
 
         async def change() -> None:
+            if self._clear_entries(mapping, record):
+                await self.session().flush()
             self._write_record(mapping, resource, record, links)
 
         await self._flush(change)
@@ -823,16 +926,20 @@ class AsyncSqlAlchemyStorage(_StorageBase, AsyncScimStorage):
         return record
 
     async def _check_uniqueness(
-        self,
-        mapping: ResourceMapping,
-        resource: Resource[Any],
-        stored: Resource[Any] | None,
+        self, resource: Resource[Any], stored: Resource[Any] | None, record: Any
     ) -> None:
         """Refuse a resource with a unique value another resource already has."""
         session = self.session()
         comparator = await self._ready_comparator(session)
-        for statement in self._unique_statements(mapping, resource, comparator, stored):
+        statements = self._unique_statements(resource, comparator, stored, record)
+        for statement in statements:
             if await session.scalar(statement) is not None:
+                raise UniquenessException
+
+    async def _check_id(self, resource_id: str) -> None:
+        """Refuse an identifier another resource already has."""
+        for statement in self._id_statements(resource_id):
+            if await self.session().scalar(statement) is not None:
                 raise UniquenessException
 
     async def _ready_comparator(self, session: "AsyncSession") -> _Comparator:

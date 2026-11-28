@@ -6,6 +6,7 @@ from typing import Any
 from typing import TypeVarTuple
 from typing import cast as cast_type
 
+from scim2_models import AttributeBinding
 from scim2_models import InvalidCursorException
 from scim2_models import InvalidPathException
 from scim2_models import ResponseParameters
@@ -14,8 +15,8 @@ from scim2_models.path import CompareOperator
 from scim2_server.keyset import Position
 from scim2_server.mapping import Collection
 from scim2_server.mapping import Column
-from scim2_server.mapping.filters import compare
 from scim2_server.mapping.filters import entry_present
+from scim2_server.mapping.filters import holds_any
 from scim2_server.mapping.filters import sort_target
 from scim2_server.mapping.filters import where
 from sqlalchemy import BigInteger
@@ -470,26 +471,49 @@ def _load_statement(
     return statement.with_for_update() if locked else statement
 
 
+def _id_taken_statement(
+    mapping: ResourceMapping, resource_id: str
+) -> Select[Any] | None:
+    """Return the statement finding a record of a mapping with an identifier, or None when no record can have it."""
+    key = _as_key(mapping._id, resource_id)
+    if key is None:
+        return None
+    condition = mapping._id.expression == _bound(mapping._id, key)
+    return select(mapping._id.expression).where(condition).limit(1)
+
+
 def _taken_statement(
     mapping: ResourceMapping,
-    column: Column,
-    value: Any,
-    resource_id: str | None,
+    binding: AttributeBinding,
+    values: list[Any],
     comparator: _Comparator,
+    record: Any,
 ) -> Select[Any]:
-    """Return the statement finding another record holding a unique value."""
-    condition = compare(
-        mapping,
-        _Predicates(comparator),
-        comparator.policy,
-        column,
-        CompareOperator.eq,
-        value,
+    """Return the statement finding a record of a mapping holding one of some unique values.
+
+    record is the record an update writes, and None for a new resource. It is
+    left out, even when it is read through another mapping of its class.
+    """
+    condition = holds_any(
+        mapping, _Predicates(comparator), comparator.policy, binding, values
     )
-    key = None if resource_id is None else _as_key(mapping._id, resource_id)
-    if key is not None:
-        condition = and_(condition, mapping._id.expression != _bound(mapping._id, key))
+    if record is not None:
+        condition = and_(condition, _other_than(mapping, record))
     return select(mapping._id.expression).where(condition).limit(1)
+
+
+def _other_than(mapping: ResourceMapping, record: Any) -> ColumnElement[bool]:
+    """Return the condition that a record of a mapping is not the given one.
+
+    Two classes share their records when their base classes map the same
+    table, such as two classes of a table, or of an inheritance.
+    """
+    mapper: Mapper[Any] = inspect(mapping.record)
+    state = inspect(record)
+    if mapper.base_mapper.local_table is not state.mapper.base_mapper.local_table:
+        return true()
+    keys = zip(mapper.primary_key, state.identity, strict=True)
+    return not_(and_(*(column == key for column, key in keys)))
 
 
 def _links_statement(collection: Collection, ids: list[str]) -> Select[Any]:
